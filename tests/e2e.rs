@@ -29,6 +29,7 @@ impl TestServer {
             listening: parking_lot::Mutex::new(ListeningState::Idle),
             rate_limiters: asr_overlay::rate_limit::RateLimiters::new(),
             render_style: parking_lot::Mutex::new(asr_overlay::render::RenderStyle::default()),
+            style_tx: tokio::sync::broadcast::channel(16).0,
         });
 
         let app = build_router(state);
@@ -146,4 +147,58 @@ async fn e2e_stop_is_idempotent() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["ok"], true);
     assert_eq!(json["listening"], false);
+}
+
+#[tokio::test]
+async fn e2e_serves_the_config_page_and_its_assets() {
+    let server = TestServer::new().await;
+
+    for (path, needle) in [
+        ("/config", "Preview"),
+        ("/config.js", "OverlayStyle"),
+        ("/style.js", "caption-text"),
+    ] {
+        let response = server
+            .client
+            .get(format!("{}{path}", server.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        let body = response.text().await.unwrap();
+        assert!(body.contains(needle), "{path} is missing {needle}");
+    }
+}
+
+#[tokio::test]
+async fn e2e_style_endpoint_updates_the_live_config() {
+    let server = TestServer::new().await;
+
+    let style = asr_overlay::config::OverlayStyle {
+        color: "#ff0000".to_string(),
+        font_size: 44,
+        ..asr_overlay::config::OverlayStyle::default()
+    };
+
+    let response = server
+        .client
+        .post(format!("{}/style", server.base_url))
+        .json(&style)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    // The live style must be visible through /settings straight away.
+    let config: serde_json::Value = server
+        .client
+        .get(format!("{}/settings", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["style"]["color"], "#ff0000");
+    assert_eq!(config["style"]["font_size"], 44);
 }

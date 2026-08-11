@@ -36,6 +36,8 @@ async fn main() {
     asr_overlay::config::save(&config);
 
     let (caption_tx, _caption_rx) = tokio::sync::broadcast::channel::<asr_overlay::caption::Caption>(16);
+    let (style_tx, _style_rx) =
+        tokio::sync::broadcast::channel::<asr_overlay::config::OverlayStyle>(16);
 
     let state = Arc::new(asr_overlay::server::AppState {
         config: parking_lot::Mutex::new(config.clone()),
@@ -44,6 +46,7 @@ async fn main() {
         listening: parking_lot::Mutex::new(asr_overlay::server::ListeningState::Idle),
         rate_limiters: asr_overlay::rate_limit::RateLimiters::new(),
         render_style: parking_lot::Mutex::new(asr_overlay::render::RenderStyle::default()),
+        style_tx,
     });
 
     let port = config.port;
@@ -51,6 +54,7 @@ async fn main() {
 
     log::info!("ASR Overlay running at http://localhost:{port}");
     log::info!("Overlay (OBS Browser Source): http://localhost:{port}/");
+    log::info!("Settings page: http://localhost:{port}/config");
     log::info!("ASR:    {}", asr_overlay::asr::ARK_ASR.repo);
     log::info!("Cache:  {}", asr_overlay::hub::cache_root().display());
 

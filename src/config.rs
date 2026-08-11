@@ -1,4 +1,59 @@
 use serde::{Deserialize, Serialize};
+
+/// How the overlay draws captions. Every field maps to CSS on the overlay
+/// page, so the caption stays real DOM text — stylable and selectable — rather
+/// than a rendered image.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OverlayStyle {
+    pub font_family: String,
+    pub font_size: u32,
+    pub font_weight: u32,
+    /// CSS colour for the text (any CSS colour syntax).
+    pub color: String,
+    /// Background behind the caption block; use `transparent` for none.
+    pub background: String,
+    pub padding: u32,
+    pub radius: u32,
+    /// Full CSS `text-shadow` value — the usual way to keep white text legible
+    /// over a bright scene.
+    pub text_shadow: String,
+    /// `bottom` | `center` | `top`
+    pub position: String,
+    /// `left` | `center` | `right`
+    pub align: String,
+    /// Caption block width as a percentage of the source.
+    pub max_width: u32,
+    /// Distance from the chosen edge, in px.
+    pub margin: u32,
+    pub uppercase: bool,
+    /// Fade-in duration in ms.
+    pub fade_ms: u32,
+    /// Appended verbatim to the overlay stylesheet, so anything not covered by
+    /// the fields above can still be styled.
+    pub custom_css: String,
+}
+
+impl Default for OverlayStyle {
+    fn default() -> Self {
+        Self {
+            font_family: "-apple-system, \"Segoe UI\", Roboto, sans-serif".to_string(),
+            font_size: 28,
+            font_weight: 600,
+            color: "#ffffff".to_string(),
+            background: "transparent".to_string(),
+            padding: 8,
+            radius: 8,
+            text_shadow: "0 2px 6px rgba(0,0,0,0.9), 0 0 2px #000".to_string(),
+            position: "bottom".to_string(),
+            align: "center".to_string(),
+            max_width: 90,
+            margin: 40,
+            uppercase: false,
+            fade_ms: 200,
+            custom_css: String::new(),
+        }
+    }
+}
 use std::fs;
 use std::path::PathBuf;
 
@@ -27,9 +82,12 @@ pub struct AsrConfig {
     /// Maximum utterance length (in ms) — forces segmentation of long speech.
     #[serde(default = "default_vad_max_ms")]
     pub vad_max_ms: u64,
-    /// Number of ONNX/whisper threads used during inference.
+    /// Number of ONNX threads used during inference.
     #[serde(default = "default_threads")]
     pub threads: usize,
+    /// Caption appearance on the overlay page.
+    #[serde(default)]
+    pub style: OverlayStyle,
 }
 
 impl Default for AsrConfig {
@@ -44,6 +102,7 @@ impl Default for AsrConfig {
             vad_min_ms: default_vad_min_ms(),
             vad_max_ms: default_vad_max_ms(),
             threads: default_threads(),
+            style: OverlayStyle::default(),
         }
     }
 }
@@ -148,6 +207,7 @@ mod tests {
             vad_min_ms: 500,
             vad_max_ms: 20_000,
             threads: 4,
+            style: OverlayStyle::default(),
         };
 
         let json = serde_json::to_string(&config).unwrap();

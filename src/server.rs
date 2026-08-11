@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::{self, CorsLayer};
 
 use crate::caption::Caption;
-use crate::config::AsrConfig;
+use crate::config::{AsrConfig, OverlayStyle};
 use crate::rate_limit::{rate_limit_middleware, RateLimiters};
 use crate::render::{render_caption_png, RenderStyle};
 
@@ -37,6 +37,9 @@ pub struct AppState {
     pub listening: Mutex<ListeningState>,
     pub rate_limiters: RateLimiters,
     pub render_style: Mutex<RenderStyle>,
+    /// Style updates pushed to connected overlays so edits in the config page
+    /// appear in OBS without reloading the Browser Source.
+    pub style_tx: broadcast::Sender<OverlayStyle>,
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -44,6 +47,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/", get(serve_index))
+        .route("/config", get(|| async { serve_embedded("config.html") }))
+        .route("/style", post(set_style))
         .route("/ws", get(ws_stream))
         .route("/caption.png", get(caption_png))
         .route("/settings", get(get_config).post(set_config))
@@ -51,6 +56,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/start", post(start_listening))
         .route("/stop", post(stop_listening))
         .route("/index.js", get(|| async { serve_embedded("index.js") }))
+        .route("/config.js", get(|| async { serve_embedded("config.js") }))
+        .route("/style.js", get(|| async { serve_embedded("style.js") }))
         .route(
             "/assets/{*path}",
             get(|axum::extract::Path(path): axum::extract::Path<String>| async move {
@@ -108,33 +115,61 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-/// WebSocket caption stream. Emits JSON captions to overlay clients.
+/// Messages pushed to overlay clients, tagged so one socket can carry both
+/// captions and live style updates.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum WsMessage {
+    Caption(Caption),
+    Style { style: OverlayStyle },
+}
+
+/// WebSocket stream: JSON captions plus style updates.
 async fn ws_stream(
     ws: axum::extract::ws::WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let caption_rx = state.caption_tx.subscribe();
+    let mut caption_rx = state.caption_tx.subscribe();
+    let mut style_rx = state.style_tx.subscribe();
+
     ws.on_upgrade(move |mut socket| async move {
-        let mut caption_rx = caption_rx;
         loop {
-            match caption_rx.recv().await {
-                Ok(caption) => {
-                    let Ok(json) = serde_json::to_string(&caption) else {
-                        continue;
-                    };
-                    if socket
-                        .send(axum::extract::ws::Message::Text(json.into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+            let message = tokio::select! {
+                caption = caption_rx.recv() => match caption {
+                    Ok(caption) => WsMessage::Caption(caption),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                style = style_rx.recv() => match style {
+                    Ok(style) => WsMessage::Style { style },
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            };
+
+            let Ok(json) = serde_json::to_string(&message) else {
+                continue;
+            };
+            if socket
+                .send(axum::extract::ws::Message::Text(json.into()))
+                .await
+                .is_err()
+            {
+                break;
             }
         }
     })
+}
+
+/// Live style preview: update the in-memory style and broadcast it to every
+/// connected overlay. Not persisted — POST /settings saves.
+async fn set_style(
+    State(state): State<Arc<AppState>>,
+    axum::Json(style): axum::Json<OverlayStyle>,
+) -> StatusCode {
+    state.config.lock().style = style.clone();
+    let _ = state.style_tx.send(style);
+    StatusCode::OK
 }
 
 /// Serve the latest caption rendered as a transparent PNG via cairo.
@@ -176,6 +211,7 @@ async fn set_config(
         guard.clone()
     };
     crate::config::save(&saved);
+    let _ = state.style_tx.send(saved.style);
     StatusCode::OK
 }
 
@@ -291,6 +327,7 @@ mod tests {
             listening: Mutex::new(ListeningState::Idle),
             rate_limiters: crate::rate_limit::RateLimiters::new(),
             render_style: Mutex::new(RenderStyle::default()),
+            style_tx: broadcast::channel(16).0,
         })
     }
 

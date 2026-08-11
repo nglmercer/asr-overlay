@@ -63,6 +63,9 @@ impl LlmMeta {
 /// `DEFAULT_ASR_BLOCK_TOKEN_ID_FROM` in the reference runtime.
 const BLOCK_TOKEN_ID_FROM: usize = 151670;
 
+/// The instruction used by the official runtime.
+pub const DEFAULT_INSTRUCTION: &str = "Please transcribe this audio.";
+
 pub struct ArkAsr {
     manifest: AsrManifest,
     meta: LlmMeta,
@@ -75,6 +78,9 @@ pub struct ArkAsr {
     /// Persistent KV cache buffers, reused across utterances.
     caches: Vec<Vec<f32>>,
     max_new_tokens: usize,
+    /// Instruction given to the decoder after the audio. ARK-ASR is an audio
+    /// LLM, so this steers what it produces.
+    instruction: String,
 }
 
 fn open_session(path: &Path, threads: usize) -> Result<Session> {
@@ -133,6 +139,7 @@ impl ArkAsr {
             llm,
             caches,
             max_new_tokens,
+            instruction: DEFAULT_INSTRUCTION.to_string(),
         })
     }
 
@@ -147,7 +154,7 @@ impl ArkAsr {
             prompt.push_str("<|audio|>");
         }
         prompt.push_str("<|end_of_audio|>");
-        prompt.push_str("Please transcribe this audio.");
+        prompt.push_str(&self.instruction);
         prompt.push_str("<|assistant|>");
         prompt
     }
@@ -193,6 +200,15 @@ impl ArkAsr {
         let (shape, embeds) = adapted[0].try_extract_tensor::<f32>()?;
         let n_tokens = shape[1] as usize;
         Ok((embeds.to_vec(), n_tokens))
+    }
+
+    /// Override the decoder instruction (empty resets to the default).
+    pub fn set_instruction(&mut self, instruction: &str) {
+        self.instruction = if instruction.trim().is_empty() {
+            DEFAULT_INSTRUCTION.to_string()
+        } else {
+            instruction.trim().to_string()
+        };
     }
 
     /// Look up token embeddings.

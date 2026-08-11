@@ -1,6 +1,9 @@
 (() => {
-    const captionEl = document.getElementById('caption');
+    const captionEl = document.querySelector('#caption .caption-text');
     const statusEl = document.getElementById('status');
+
+    const applyStyle = (style) =>
+        window.OverlayStyle.applyStyle(style, '#caption', 'overlay-style');
 
     const showCaption = (text) => {
         captionEl.textContent = text;
@@ -12,8 +15,15 @@
         captionEl.textContent = '';
     };
 
-    // Keep the last caption visible until a newer one arrives. If a caption is
-    // empty (Whisper returned nothing), clear the overlay.
+    // Style comes from /settings on load, then live over the WebSocket so
+    // edits in the config page show up in OBS without reloading the source.
+    fetch('/settings')
+        .then((r) => r.json())
+        .then((config) => applyStyle(config.style))
+        .catch(() => applyStyle(null));
+
+    // Keep the last caption visible until a newer one arrives. An empty
+    // caption clears the overlay.
     const connect = () => {
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -25,9 +35,12 @@
 
         ws.onmessage = (ev) => {
             try {
-                const caption = JSON.parse(ev.data);
-                if (caption && typeof caption.text === 'string') {
-                    if (caption.text) showCaption(caption.text);
+                const msg = JSON.parse(ev.data);
+                if (!msg) return;
+                if (msg.type === 'style') {
+                    applyStyle(msg.style);
+                } else if (msg.type === 'caption') {
+                    if (msg.text) showCaption(msg.text);
                     else hideCaption();
                 }
             } catch (_) { /* ignore malformed frames */ }

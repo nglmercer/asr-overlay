@@ -13,7 +13,7 @@ fn main() -> Result<()> {
         Some("inspect") => inspect(),
         Some("transcribe") => {
             let path = args.next().ok_or_else(|| anyhow!("usage: transcribe <file.wav>"))?;
-            transcribe(&path)
+            transcribe(&path, args.next())
         }
         _ => Err(anyhow!("usage: asr-tool [inspect | transcribe <file.wav>]")),
     }
@@ -50,7 +50,7 @@ fn inspect() -> Result<()> {
     Ok(())
 }
 
-fn transcribe(path: &str) -> Result<()> {
+fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
     let samples = read_wav_16k_mono(path)?;
     println!(
         "Loaded {} samples ({:.2}s)",
@@ -60,6 +60,10 @@ fn transcribe(path: &str) -> Result<()> {
 
     let started = std::time::Instant::now();
     let mut asr = asr_overlay::asr::load(5, 256)?;
+    if let Some(instruction) = &instruction {
+        println!("Instruction: {instruction}");
+        asr.set_instruction(instruction);
+    }
     println!("Model loaded in {:.1}s", started.elapsed().as_secs_f32());
 
     let started = std::time::Instant::now();
