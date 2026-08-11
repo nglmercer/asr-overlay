@@ -28,6 +28,7 @@ impl TestServer {
             last_caption: Arc::new(parking_lot::Mutex::new(None)),
             listening: parking_lot::Mutex::new(ListeningState::Idle),
             rate_limiters: asr_overlay::rate_limit::RateLimiters::new(),
+            render_style: parking_lot::Mutex::new(asr_overlay::render::RenderStyle::default()),
         });
 
         let app = build_router(state);

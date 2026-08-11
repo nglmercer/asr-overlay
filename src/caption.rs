@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use serde::Serialize;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::audio::{resample_mono, AudioChunk};
 use crate::config::AsrConfig;
@@ -26,8 +26,9 @@ pub struct CaptionPipeline {
     config: AsrConfig,
     speech: Vec<f32>,
     in_speech: bool,
-    last_speech: Option<Instant>,
-    speech_started: Option<Instant>,
+    /// Accumulated silence duration (in samples) while in an utterance.
+    silence_samples: u64,
+    speech_started: bool,
 }
 
 impl CaptionPipeline {
@@ -37,40 +38,39 @@ impl CaptionPipeline {
             config,
             speech: Vec::new(),
             in_speech: false,
-            last_speech: None,
-            speech_started: None,
+            silence_samples: 0,
+            speech_started: false,
         }
     }
 
     /// Feed one mic chunk. Returns a closed utterance (at mic rate) if the
     /// segmentation state machine decided one is complete, else `None`.
     pub fn push_chunk(&mut self, chunk: &AudioChunk) -> Option<Vec<f32>> {
-        let _chunk_ms = 1000.0 * chunk.len() as f32 / self.mic_rate.max(1) as f32;
         let rms = rms(chunk);
-        let now = Instant::now();
+        let chunk_samples = chunk.len() as u64;
+        let silence_limit =
+            (self.config.vad_silence_ms * self.mic_rate as u64) / 1000;
+        let max_limit = (self.config.vad_max_ms * self.mic_rate as u64) / 1000;
 
         if rms >= self.config.vad_threshold {
             if !self.in_speech {
                 self.in_speech = true;
-                self.speech_started = Some(now);
+                self.speech_started = true;
                 // Keep a short pre-roll so the first phonemes are not cut.
                 self.speech.clear();
             }
             self.speech.extend_from_slice(chunk);
-            self.last_speech = Some(now);
+            self.silence_samples = 0;
 
             // Force-segment very long utterances.
-            if let Some(start) = self.speech_started {
-                if now.duration_since(start).as_millis() as u64 >= self.config.vad_max_ms {
-                    return self.close_utterance();
-                }
+            if max_limit > 0 && self.speech.len() as u64 >= max_limit {
+                return self.close_utterance();
             }
         } else if self.in_speech {
             // Silence after speech: close once the window elapses.
-            if let Some(last) = self.last_speech {
-                if now.duration_since(last).as_millis() as u64 >= self.config.vad_silence_ms {
-                    return self.close_utterance();
-                }
+            self.silence_samples += chunk_samples;
+            if self.silence_samples >= silence_limit {
+                return self.close_utterance();
             }
         }
 
@@ -86,8 +86,8 @@ impl CaptionPipeline {
         let was_speech = self.in_speech;
         let speech = std::mem::take(&mut self.speech);
         self.in_speech = false;
-        self.last_speech = None;
-        self.speech_started = None;
+        self.silence_samples = 0;
+        self.speech_started = false;
 
         if !was_speech {
             return None;

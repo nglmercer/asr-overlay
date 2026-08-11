@@ -17,6 +17,7 @@ use tower_http::cors::{self, CorsLayer};
 use crate::caption::Caption;
 use crate::config::AsrConfig;
 use crate::rate_limit::{rate_limit_middleware, RateLimiters};
+use crate::render::{render_caption_png, RenderStyle};
 
 mod embedded_assets {
     include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
@@ -35,6 +36,7 @@ pub struct AppState {
     pub last_caption: Arc<Mutex<Option<Caption>>>,
     pub listening: Mutex<ListeningState>,
     pub rate_limiters: RateLimiters,
+    pub render_style: Mutex<RenderStyle>,
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -43,6 +45,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(serve_index))
         .route("/ws", get(ws_stream))
+        .route("/caption.png", get(caption_png))
         .route("/settings", get(get_config).post(set_config))
         .route("/status", get(caption_status))
         .route("/start", post(start_listening))
@@ -132,6 +135,30 @@ async fn ws_stream(
             }
         }
     })
+}
+
+/// Serve the latest caption rendered as a transparent PNG via cairo.
+async fn caption_png(State(state): State<Arc<AppState>>) -> Response {
+    let caption = state.last_caption.lock().clone();
+    let style = state.render_style.lock().clone();
+    let Some(caption) = caption else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    match render_caption_png(&caption.text, &style) {
+        Ok(png) => {
+            let mut response = Response::new(Body::from(png));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("image/png"),
+            );
+            response
+        }
+        Err(e) => {
+            log::error!("cairo render failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -263,6 +290,7 @@ mod tests {
             last_caption: Arc::new(Mutex::new(None)),
             listening: Mutex::new(ListeningState::Idle),
             rate_limiters: crate::rate_limit::RateLimiters::new(),
+            render_style: Mutex::new(RenderStyle::default()),
         })
     }
 
@@ -278,7 +306,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(body.windows(9).any(|w| w == b"<div id="));
+        assert!(body.windows(16).any(|w| w == b"<div id=\"caption"));
     }
 
     #[tokio::test]

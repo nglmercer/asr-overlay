@@ -13,10 +13,13 @@ pub struct WhisperStt {
 impl WhisperStt {
     /// Load the ggml model and prepare a state factory.
     pub fn load(model_path: &str, language: &str, threads: usize) -> Result<Self> {
-        let mut ctx_params = WhisperContextParameters::default();
-        ctx_params.use_gpu = std::env::var("WHISPER_USE_GPU")
+        let use_gpu = std::env::var("WHISPER_USE_GPU")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
+        let ctx_params = WhisperContextParameters {
+            use_gpu,
+            ..WhisperContextParameters::default()
+        };
         let ctx = WhisperContext::new_with_params(model_path, ctx_params)
             .map_err(|e| anyhow!("Failed to load Whisper model {model_path}: {e}"))?;
         log::info!("Loaded Whisper model: {model_path}");

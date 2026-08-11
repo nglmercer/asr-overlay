@@ -43,6 +43,7 @@ async fn main() {
         last_caption: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         listening: parking_lot::Mutex::new(asr_overlay::server::ListeningState::Idle),
         rate_limiters: asr_overlay::rate_limit::RateLimiters::new(),
+        render_style: parking_lot::Mutex::new(asr_overlay::render::RenderStyle::default()),
     });
 
     let port = config.port;
