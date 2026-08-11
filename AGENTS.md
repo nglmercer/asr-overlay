@@ -8,7 +8,8 @@ No cloud, no Python runtime, no GPU.
 
 - **Audio**: `cpal` input stream; the callback only forwards samples to a
   `crossbeam-channel`. Inference never runs in the audio callback.
-- **Resample**: `rubato` → mono `f32` @ 16 kHz for the ASR frontend.
+- **Resample**: `audio.rs` windowed-sinc → mono `f32` @ 16 kHz. No `rubato`:
+  its `FftFixedOut`, sized per call, returned silence for long buffers.
 - **VAD**: RMS-energy gate in `caption.rs` (threshold / silence / min / max ms
   from `AsrConfig`).
 - **Mel**: `asr/mel.rs` — Whisper log-mel frontend (128 bins, n_fft 400,
@@ -24,7 +25,9 @@ No cloud, no Python runtime, no GPU.
 - **Server**: `axum` serves the overlay page, a WebSocket caption stream, and a
   cairo-rendered PNG caption.
 - **Tray**: `tray-icon` + GTK.
-- **Config**: JSON at `~/.config/asr-overlay/config.json`.
+- **Config**: JSON at `~/.config/asr-overlay/config.json`; edited from the
+  `/config` page, which previews caption styling live via `static/style.js`
+  (shared with the overlay so the preview cannot drift).
 
 ## Commands
 
@@ -45,10 +48,16 @@ No cloud, no Python runtime, no GPU.
 | GET | `/` | Overlay page (OBS Browser Source) |
 | GET | `/ws` | WebSocket caption stream + control commands |
 | GET | `/caption.png` | Latest caption as a transparent PNG |
-| GET | `/status` | `{ running, listening, has_text }` |
+| GET | `/config` | Settings page with live preview |
+| GET | `/devices` | Available microphones |
+| POST | `/style` | Live style preview (not persisted) |
+| GET | `/status` | `{ running, listening, has_caption }` |
 | POST | `/start` | Start listening |
 | POST | `/stop` | Stop listening |
 | GET/POST | `/settings` | Read / update config JSON |
+| GET | `/config` | Settings page with live preview |
+| GET | `/devices` | Available microphones |
+| POST | `/style` | Live style preview (not persisted) |
 
 ## Rules
 

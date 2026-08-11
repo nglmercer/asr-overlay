@@ -16,8 +16,8 @@ cargo run
 
 That's it. On first run the ASR model (~1.7 GiB) is downloaded automatically
 into `~/.cache/asr-overlay/models/` and reused from then on — the same way
-`transformers` caches models. Then point an OBS Browser Source at
-`http://localhost:8080/`.
+`transformers` caches models. Then point an OBS Browser Source at `http://localhost:8080/`, and open
+`http://localhost:8080/config` to pick a microphone and style the captions.
 
 Set `ASR_OVERLAY_CACHE` to put the cache somewhere else.
 
@@ -70,6 +70,17 @@ utterances (1–3 s) are far cheaper than this 11 s sample. Note that 1.4x
 realtime is **slower than whisper-small** on the same CPU — the accuracy and
 the 19-language coverage are what you get for it.
 
+## Captions are text, not an image
+
+The overlay renders the caption as real DOM text (`#caption .caption-text`),
+so it is stylable with plain CSS and never a video frame. The settings page at
+`/config` edits font, colour, background, position and free-form custom CSS,
+with a live preview that uses the very same stylesheet generator as the
+overlay. Saved styles push to connected overlays over the WebSocket, so OBS
+updates without reloading the Browser Source.
+
+`/caption.png` still exists for sources that cannot run JavaScript.
+
 ## Architecture
 
 ```text
@@ -81,7 +92,7 @@ Microphone ────────▶│ CPAL          │
                     ┌───────────────┐
                     │ Resample      │
                     │ mono → 16 kHz │
-                    │ (rubato)      │
+                    │ windowed sinc │
                     └───────┬───────┘
                             ▼
                     ┌───────────────┐
@@ -118,13 +129,15 @@ Modules:
 
 - **Mic** (`audio.rs`) — `cpal` input stream; the callback only copies samples
   into a channel. Inference never runs in the callback.
+- **Resample** (`audio.rs`) — windowed-sinc conversion to 16 kHz mono.
 - **VAD** (`caption.rs`) — RMS gate splitting utterances.
 - **Mel** (`asr/mel.rs`) — Whisper feature extractor ported to Rust (`rustfft`).
 - **ASR** (`asr/model.rs`) — the four ONNX graphs and the decode loop.
 - **Hub** (`hub.rs`) — model auto-download with an on-disk cache.
 - **TTS** (`tts/`) — Audio8 DualAR ONNX INT4. Not wired up yet.
 - **Server** (`server.rs`) — axum serves the overlay and pushes captions.
-- **Render** (`render.rs`) — cairo draws the caption to a transparent PNG.
+- **Render** (`render.rs`) — cairo draws the caption to a transparent PNG for
+  consumers that cannot run JavaScript. The overlay page does not use it.
 
 ## Commands
 
@@ -147,7 +160,8 @@ Modules:
 | `--port <n>` | `8080` | HTTP port |
 | `--no-auto-start` | off | Do not start listening on launch |
 
-VAD thresholds and thread count live in `~/.config/asr-overlay/config.json`.
+Microphone, VAD thresholds, threads and caption styling all live in
+`~/.config/asr-overlay/config.json` — edit them from `/config`.
 
 ## HTTP Endpoints
 
@@ -156,7 +170,10 @@ VAD thresholds and thread count live in `~/.config/asr-overlay/config.json`.
 | GET | `/` | Overlay page (OBS Browser Source) |
 | GET | `/ws` | WebSocket caption stream + control commands |
 | GET | `/caption.png` | Latest caption as a transparent PNG |
-| GET | `/status` | `{ running, listening, has_text }` |
+| GET | `/config` | Settings page with live preview |
+| GET | `/devices` | Available microphones |
+| POST | `/style` | Live style preview (not persisted) |
+| GET | `/status` | `{ running, listening, has_caption }` |
 | POST | `/start` | Start listening |
 | POST | `/stop` | Stop listening |
 | GET | `/settings` | Get current config JSON |

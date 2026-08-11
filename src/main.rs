@@ -6,18 +6,22 @@ use clap::Parser;
 #[command(name = "asr-overlay", version, about = "OBS overlay that detects speech and generates live subtitles")]
 struct Cli {
     /// Language hint. ARK-ASR auto-detects, so this is informational.
-    #[arg(long, default_value = "auto")]
-    language: String,
+    #[arg(long)]
+    language: Option<String>,
 
     /// Maximum tokens the ASR decoder may emit per utterance.
-    #[arg(long, default_value_t = 256)]
-    max_new_tokens: usize,
+    #[arg(long)]
+    max_new_tokens: Option<usize>,
+
+    /// Input device name. Defaults to the saved one, then the system default.
+    #[arg(long)]
+    input_device: Option<String>,
 
     /// HTTP port for the overlay.
-    #[arg(long, default_value_t = 8080)]
-    port: u16,
+    #[arg(long)]
+    port: Option<u16>,
 
-    /// Auto-start listening on launch.
+    /// Do not start listening on launch.
     #[arg(long)]
     no_auto_start: bool,
 }
@@ -28,11 +32,25 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    // Start from the saved config and let CLI flags override only what was
+    // actually passed. Assigning clap's defaults unconditionally would wipe
+    // every setting saved from the config page on each launch.
     let mut config = asr_overlay::config::load();
-    config.language = cli.language;
-    config.max_new_tokens = cli.max_new_tokens;
-    config.port = cli.port;
-    config.auto_start = !cli.no_auto_start;
+    if let Some(language) = cli.language {
+        config.language = language;
+    }
+    if let Some(max_new_tokens) = cli.max_new_tokens {
+        config.max_new_tokens = max_new_tokens;
+    }
+    if let Some(input_device) = cli.input_device {
+        config.input_device = input_device;
+    }
+    if let Some(port) = cli.port {
+        config.port = port;
+    }
+    if cli.no_auto_start {
+        config.auto_start = false;
+    }
     asr_overlay::config::save(&config);
 
     let (caption_tx, _caption_rx) = tokio::sync::broadcast::channel::<asr_overlay::caption::Caption>(16);

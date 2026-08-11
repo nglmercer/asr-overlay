@@ -206,13 +206,33 @@ async fn set_config(
     State(state): State<Arc<AppState>>,
     axum::Json(config): axum::Json<AsrConfig>,
 ) -> StatusCode {
-    let saved = {
+    let (saved, needs_restart) = {
         let mut guard = state.config.lock();
+        // The capture thread copies its config when it starts, so these two
+        // only take effect on a restart. Everything else is read live.
+        let needs_restart = guard.input_device != config.input_device
+            || guard.threads != config.threads;
         *guard = config;
-        guard.clone()
+        (guard.clone(), needs_restart)
     };
+
     crate::config::save(&saved);
     let _ = state.style_tx.send(saved.style);
+
+    if needs_restart && *state.listening.lock() == ListeningState::Listening {
+        // Restarting joins the pipeline thread and reloads the model, so keep
+        // it off the async runtime's worker threads.
+        let state = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || {
+            log::info!("Input device or thread count changed — restarting capture");
+            crate::controller::stop();
+            if let Err(e) = crate::controller::start(Arc::clone(&state)) {
+                log::error!("Failed to restart capture: {e}");
+                *state.listening.lock() = ListeningState::Idle;
+            }
+        });
+    }
+
     StatusCode::OK
 }
 

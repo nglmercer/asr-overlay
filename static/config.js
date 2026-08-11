@@ -141,57 +141,95 @@
     };
 
     // --- server sync --------------------------------------------------------
-    let saveTimer = null;
+    // Everything autosaves. Style edits also stream to connected overlays
+    // immediately so OBS updates while you drag a slider, while the full
+    // config is persisted to disk on a slower debounce.
+    const readConfig = () => ({
+        ...config,
+        language: $('language').value,
+        input_device: $('input_device').value,
+        threads: +$('threads').value,
+        max_new_tokens: +$('max_new_tokens').value,
+        vad_threshold: parseFloat($('vad_threshold').value),
+        vad_silence_ms: +$('vad_silence_ms').value,
+        vad_min_ms: +$('vad_min_ms').value,
+        vad_max_ms: +$('vad_max_ms').value,
+        style: readStyle(),
+    });
+
+    const setSaveState = (text, spin) => {
+        const pill = $('save-state');
+        pill.textContent = text;
+        pill.classList.toggle('live', !spin && text === 'Saved');
+    };
+
+    let styleTimer = null;
     const pushStyle = () => {
-        // Live-update connected overlays without saving the whole config on
-        // every keystroke.
-        clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => {
+        clearTimeout(styleTimer);
+        styleTimer = setTimeout(() => {
             fetch('/style', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(readStyle()),
             }).catch(() => {});
-        }, 250);
+        }, 150);
+    };
+
+    let saveTimer = null;
+    let saving = false;
+    let pending = false;
+
+    const flush = () => {
+        if (!config) return;
+        if (saving) {
+            pending = true;
+            return;
+        }
+        saving = true;
+        setSaveState('Saving…', true);
+        const payload = readConfig();
+        fetch('/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then((r) => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                config = payload;
+                setSaveState('Saved', false);
+            })
+            .catch((e) => setSaveState(`Save failed: ${e.message}`, false))
+            .finally(() => {
+                saving = false;
+                if (pending) {
+                    pending = false;
+                    flush();
+                }
+            });
+    };
+
+    const autosave = () => {
+        setSaveState('Unsaved…', true);
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(flush, 600);
     };
 
     const onEdit = () => {
         renderPreview();
         pushStyle();
+        autosave();
     };
 
-    const save = () => {
-        if (!config) return;
-        const updated = {
-            ...config,
-            language: $('language').value,
-            input_device: $('input_device').value,
-            threads: +$('threads').value,
-            max_new_tokens: +$('max_new_tokens').value,
-            vad_threshold: parseFloat($('vad_threshold').value),
-            vad_silence_ms: +$('vad_silence_ms').value,
-            vad_min_ms: +$('vad_min_ms').value,
-            vad_max_ms: +$('vad_max_ms').value,
-            style: readStyle(),
-        };
-        const button = $('save');
-        button.disabled = true;
-        button.textContent = 'Saving…';
-        fetch('/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updated),
-        })
-            .then((r) => {
-                config = updated;
-                button.textContent = r.ok ? 'Saved ✓' : 'Failed';
-            })
-            .catch(() => { button.textContent = 'Failed'; })
-            .finally(() => {
-                button.disabled = false;
-                setTimeout(() => { button.textContent = 'Save'; }, 1500);
-            });
-    };
+    // Don't lose the last keystroke if the tab closes mid-debounce.
+    window.addEventListener('beforeunload', () => {
+        if (saveTimer) {
+            clearTimeout(saveTimer);
+            navigator.sendBeacon?.(
+                '/settings',
+                new Blob([JSON.stringify(readConfig())], { type: 'application/json' }),
+            );
+        }
+    });
 
     const refreshStatus = () => {
         fetch('/status')
@@ -210,7 +248,6 @@
         const path = $('toggle').dataset.listening ? '/stop' : '/start';
         fetch(path, { method: 'POST' }).finally(refreshStatus);
     });
-    $('save').addEventListener('click', save);
 
     // Wire every input to the preview.
     for (const [id] of [...STYLE_FIELDS, ...ROOT_FIELDS]) {

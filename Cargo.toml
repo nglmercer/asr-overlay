@@ -20,8 +20,6 @@ bytes = "1"
 
 # audio capture
 cpal = "0.18"
-# resampling
-rubato = "0.14"
 # audio callbacks → worker threads
 crossbeam-channel = "0.5"
 
