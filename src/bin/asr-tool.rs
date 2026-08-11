@@ -15,7 +15,13 @@ fn main() -> Result<()> {
             let path = args.next().ok_or_else(|| anyhow!("usage: transcribe <file.wav>"))?;
             transcribe(&path, args.next())
         }
-        _ => Err(anyhow!("usage: asr-tool [inspect | transcribe <file.wav>]")),
+        Some("micpath") => {
+            let path = args.next().ok_or_else(|| anyhow!("usage: micpath <file.wav>"))?;
+            micpath(&path)
+        }
+        _ => Err(anyhow!(
+            "usage: asr-tool [inspect | transcribe <file.wav> [instruction] | micpath <file.wav>]"
+        )),
     }
 }
 
@@ -136,4 +142,54 @@ fn read_wav_16k_mono(path: &str) -> Result<Vec<f32>> {
     } else {
         asr_overlay::audio::resample_mono(&mono, rate, 16_000)
     }
+}
+
+/// Push a 16 kHz file through the exact conversion the microphone path uses
+/// (upsample to the mic's 48 kHz, then back down) and transcribe the result.
+/// If this differs from `transcribe`, the resampler is to blame, not the model.
+fn micpath(path: &str) -> Result<()> {
+    let original = read_wav_16k_mono(path)?;
+    let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt();
+    let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+
+    let at_48k = asr_overlay::audio::resample_mono(&original, 16_000, 48_000)?;
+    let back = asr_overlay::audio::resample_mono(&at_48k, 48_000, 16_000)?;
+
+    println!("original : {:6} samples  rms {:.4}  peak {:.4}", original.len(), rms(&original), peak(&original));
+    println!("@48k     : {:6} samples  rms {:.4}  peak {:.4}", at_48k.len(), rms(&at_48k), peak(&at_48k));
+    println!("back@16k : {:6} samples  rms {:.4}  peak {:.4}", back.len(), rms(&back), peak(&back));
+
+    // How different are they really?
+    let n = original.len().min(back.len());
+    let mut max_diff = 0.0f32;
+    let mut sum_sq_diff = 0.0f64;
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..n {
+        let (a, b) = (original[i], back[i]);
+        max_diff = max_diff.max((a - b).abs());
+        sum_sq_diff += ((a - b) as f64).powi(2);
+        dot += a as f64 * b as f64;
+        na += (a as f64).powi(2);
+        nb += (b as f64).powi(2);
+    }
+    println!(
+        "max|diff| {:.5}  rms(diff) {:.5}  correlation {:.6}",
+        max_diff,
+        (sum_sq_diff / n as f64).sqrt(),
+        dot / (na.sqrt() * nb.sqrt())
+    );
+
+    // Compare what the model actually sees.
+    let mel = asr_overlay::asr::MelExtractor::new();
+    let (fa, frames_a) = mel.features(&original);
+    let (fb, frames_b) = mel.features(&back);
+    let mel_diff = fa.iter().zip(&fb).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    println!("mel frames {frames_a} vs {frames_b}, max mel diff {mel_diff:.5}");
+
+    let mut asr = asr_overlay::asr::load(5, 256)?;
+    // Reverse order on purpose: if the *first* call always wins, the problem is
+    // leftover state between calls, not the audio.
+    println!("\nmic path: {:?}", asr.transcribe(&back)?);
+    println!("direct  : {:?}", asr.transcribe(&original)?);
+    Ok(())
 }

@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, SizedSample, StreamConfig};
-use rubato::{FftFixedOut, Resampler};
 
 /// A mono `f32` audio chunk delivered off the audio callback thread.
 pub type AudioChunk = Vec<f32>;
@@ -103,45 +102,85 @@ where
     out
 }
 
+fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-9 {
+        1.0
+    } else {
+        let pi_x = std::f64::consts::PI * x;
+        pi_x.sin() / pi_x
+    }
+}
+
+/// Blackman window over `[-half, half]`, zero outside.
+fn blackman(distance: f64, half: f64) -> f64 {
+    if distance.abs() > half {
+        return 0.0;
+    }
+    let t = (distance + half) / (2.0 * half);
+    0.42 - 0.5 * (std::f64::consts::TAU * t).cos() + 0.08 * (2.0 * std::f64::consts::TAU * t).cos()
+}
+
 /// Convert a mono `f32` buffer from one sample rate to another.
 ///
-/// Uses a synchronous FFT resampler (rubato) configured with a chunk output
-/// sized to the input, so whole-buffer conversions stay simple.
+/// Windowed-sinc interpolation with an anti-aliasing cutoff at the lower of the
+/// two Nyquist limits. Coefficients are normalized per output sample, so the
+/// signal level is preserved exactly and there is no warm-up delay — a
+/// whole-buffer conversion produces a whole buffer of audio.
 pub fn resample_mono(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
+    if from_rate == 0 || to_rate == 0 {
+        return Err(anyhow!("Invalid sample rate: {from_rate} -> {to_rate}"));
+    }
     if from_rate == to_rate {
         return Ok(input.to_vec());
     }
     if input.is_empty() {
         return Ok(Vec::new());
     }
-    if from_rate == 0 || to_rate == 0 {
-        return Err(anyhow!("Invalid sample rate: {from_rate} -> {to_rate}"));
+
+    let ratio = to_rate as f64 / from_rate as f64;
+    let out_len = ((input.len() as f64) * ratio).round() as usize;
+    if out_len == 0 {
+        return Ok(Vec::new());
     }
 
-    // Size the output chunk so one call consumes the whole input.
-    let chunk_size_out = ((input.len() as f64) * (to_rate as f64) / (from_rate as f64)) as usize;
-    let chunk_size_out = chunk_size_out.max(1);
+    // Cutoff relative to the input sample rate. When downsampling this sits at
+    // the *output* Nyquist so nothing aliases back into the band.
+    let cutoff = 0.5 * ratio.min(1.0);
+    // Downsampling stretches the kernel, so widen it to keep the same quality.
+    let half = (16.0 / ratio.min(1.0)).ceil() as isize;
 
-    let mut resampler = FftFixedOut::<f32>::new(
-        from_rate as usize,
-        to_rate as usize,
-        chunk_size_out,
-        1,
-        1,
-    )?;
+    let last = input.len() as isize - 1;
+    let mut output = Vec::with_capacity(out_len);
 
-    let frames_needed = resampler.input_frames_next();
-    let mut wave_in = vec![input.to_vec()];
-    // The FFT resampler wants at least `frames_needed` input frames; zero-pad
-    // short buffers, then trim output to the expected length.
-    if wave_in[0].len() < frames_needed {
-        wave_in[0].resize(frames_needed, 0.0);
+    for j in 0..out_len {
+        // Position of this output sample, in input-sample units.
+        let center = j as f64 / ratio;
+        let base = center.floor() as isize;
+
+        let mut acc = 0.0f64;
+        let mut norm = 0.0f64;
+        for i in (base - half)..=(base + half + 1) {
+            let distance = center - i as f64;
+            let window = blackman(distance, half as f64);
+            if window == 0.0 {
+                continue;
+            }
+            let coefficient = window * sinc(2.0 * cutoff * distance);
+            norm += coefficient;
+            // Clamp to the edges rather than reading zeros past the end, which
+            // would fade the first and last samples toward silence.
+            let index = i.clamp(0, last) as usize;
+            acc += coefficient * input[index] as f64;
+        }
+
+        output.push(if norm.abs() > 1e-12 {
+            (acc / norm) as f32
+        } else {
+            0.0
+        });
     }
 
-    let mut output = resampler.process(&wave_in, None)?;
-    let mut samples = output.remove(0);
-    samples.truncate(chunk_size_out);
-    Ok(samples)
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -176,6 +215,70 @@ mod tests {
         let input: Vec<f32> = (0..4800).map(|i| (i as f32 / 10.0).sin()).collect();
         let out = resample_mono(&input, 48000, 16000).unwrap();
         assert!(out.len() >= 1500 && out.len() <= 1601, "got {}", out.len());
+    }
+
+    /// Length alone says nothing about whether the audio survived. A 440 Hz
+    /// tone must still be a 440 Hz tone, at the same level, after 48k -> 16k.
+    #[test]
+    fn test_resample_preserves_the_signal() {
+        let rate = 48_000;
+        let freq = 440.0_f32;
+        let input: Vec<f32> = (0..rate)
+            .map(|i| (i as f32 * freq * std::f32::consts::TAU / rate as f32).sin() * 0.5)
+            .collect();
+
+        let out = resample_mono(&input, rate as u32, 16_000).unwrap();
+        assert!(out.len() >= 15_000, "too short: {}", out.len());
+
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        let in_rms = rms(&input);
+        let out_rms = rms(&out[100..out.len() - 100]);
+        assert!(
+            (out_rms - in_rms).abs() < 0.05,
+            "level changed: {in_rms} -> {out_rms}"
+        );
+
+        // Count zero crossings to recover the frequency: 440 Hz over ~1 s is
+        // ~880 crossings regardless of sample rate.
+        let crossings = out
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        let seconds = out.len() as f32 / 16_000.0;
+        let measured = crossings as f32 / 2.0 / seconds;
+        assert!(
+            (measured - freq).abs() < 20.0,
+            "frequency changed: {measured} Hz"
+        );
+    }
+
+    /// The bug this replaced: 48k -> 16k over a long buffer returned pure
+    /// silence, so every microphone utterance reached the model as zeros.
+    #[test]
+    fn test_resample_long_buffer_is_not_silent() {
+        let input: Vec<f32> = (0..528_000)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5)
+            .collect();
+        let out = resample_mono(&input, 48_000, 16_000).unwrap();
+        assert_eq!(out.len(), 176_000);
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.4, "output is silent: peak {peak}");
+    }
+
+    #[test]
+    fn test_resample_roundtrip_preserves_audio() {
+        let input: Vec<f32> = (0..16_000)
+            .map(|i| (i as f32 * 300.0 * std::f32::consts::TAU / 16_000.0).sin() * 0.5)
+            .collect();
+        let up = resample_mono(&input, 16_000, 48_000).unwrap();
+        let back = resample_mono(&up, 48_000, 16_000).unwrap();
+        assert_eq!(back.len(), input.len());
+
+        // Ignore the outermost samples, where the kernel runs off the edge.
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        let a = rms(&input[200..input.len() - 200]);
+        let b = rms(&back[200..back.len() - 200]);
+        assert!((a - b).abs() < 0.02, "level drifted: {a} -> {b}");
     }
 
     #[test]
