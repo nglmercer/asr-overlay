@@ -66,6 +66,32 @@ const BLOCK_TOKEN_ID_FROM: usize = 151670;
 /// The instruction used by the official runtime.
 pub const DEFAULT_INSTRUCTION: &str = "Please transcribe this audio.";
 
+/// Longest repeating unit the loop guard looks for.
+const LOOP_MAX_CYCLE: usize = 4;
+
+/// How many times that unit must repeat back-to-back to count as a loop.
+const LOOP_REPEATS: usize = 8;
+
+/// Detect a degenerate tail — "oh, oh, oh, oh, …" — and report the length of
+/// the repeating unit.
+///
+/// Given unclear audio the decoder can fall into a cycle it only leaves at the
+/// token budget, which costs ~20 s per utterance and emits a wall of garbage.
+/// Eight repeats of the same short cycle is not something a speaker says.
+fn looping_cycle(tokens: &[u32]) -> Option<usize> {
+    for cycle in 1..=LOOP_MAX_CYCLE {
+        let span = cycle * LOOP_REPEATS;
+        if tokens.len() < span {
+            continue;
+        }
+        let tail = &tokens[tokens.len() - span..];
+        if tail.chunks(cycle).all(|unit| unit == &tail[..cycle]) {
+            return Some(cycle);
+        }
+    }
+    None
+}
+
 pub struct ArkAsr {
     manifest: AsrManifest,
     meta: LlmMeta,
@@ -396,6 +422,15 @@ impl ArkAsr {
                 break;
             }
             out_ids.push(next as u32);
+            if let Some(cycle) = looping_cycle(&out_ids) {
+                log::debug!(
+                    "ASR: stopped a {cycle}-token repetition loop after {} tokens",
+                    out_ids.len()
+                );
+                // Keep one copy of the repeated unit and drop the rest.
+                out_ids.truncate(out_ids.len() - cycle * (LOOP_REPEATS - 1));
+                break;
+            }
             let embed = self.embed(&[next])?;
             logits = self.forward(embed, 1, total_len)?;
         }
@@ -444,6 +479,25 @@ mod tests {
         "max_total_len": 2048,
         "model_type": "arkasr"
     }"#;
+
+    #[test]
+    fn loop_guard_spots_a_repeating_tail() {
+        // "oh," ×8 — the failure mode this guards against.
+        let mut tokens: Vec<u32> = vec![10, 20, 30];
+        tokens.extend(std::iter::repeat_n([40u32, 41], 8).flatten());
+        assert_eq!(looping_cycle(&tokens), Some(2));
+
+        // A single token repeated is the shortest cycle.
+        assert_eq!(looping_cycle(&[7; 8]), Some(1));
+    }
+
+    #[test]
+    fn loop_guard_leaves_normal_speech_alone() {
+        // "no, no, no." repeats, but nowhere near eight times.
+        let tokens: Vec<u32> = vec![1, 2, 3, 4, 3, 4, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert_eq!(looping_cycle(&tokens), None);
+        assert_eq!(looping_cycle(&[]), None);
+    }
 
     #[test]
     fn parses_the_real_manifest() {

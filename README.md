@@ -130,7 +130,10 @@ Modules:
 - **Mic** (`audio.rs`) — `cpal` input stream; the callback only copies samples
   into a channel. Inference never runs in the callback.
 - **Resample** (`audio.rs`) — windowed-sinc conversion to 16 kHz mono.
-- **VAD** (`caption.rs`) — RMS gate splitting utterances.
+- **VAD** (`caption.rs`) — RMS gate splitting utterances. It keeps 300 ms of
+  pre-roll, the pauses inside an utterance, and 300 ms of tail, and needs only
+  half the threshold to stay in speech. Handing the model clipped, spliced
+  fragments makes it hallucinate — confidently, and often in another language.
 - **Mel** (`asr/mel.rs`) — Whisper feature extractor ported to Rust (`rustfft`).
 - **ASR** (`asr/model.rs`) — the four ONNX graphs and the decode loop.
 - **Hub** (`hub.rs`) — model auto-download with an on-disk cache.
@@ -146,6 +149,8 @@ Modules:
 | `cargo run` | Start the caption server (downloads the model if needed) |
 | `cargo run --bin asr-tool -- inspect` | Print every ONNX graph's inputs/outputs |
 | `cargo run --release --bin asr-tool -- transcribe x.wav` | Transcribe a file |
+| `cargo run --release --bin asr-tool -- vad x.wav [gain]` | Segment a file through the live VAD and transcribe each utterance |
+| `cargo run --release --bin asr-tool -- micpath x.wav` | Compare direct vs. resampled-through-48 kHz transcription |
 | `cargo check` | Type check |
 | `cargo clippy -- -D warnings` | Lint |
 | `cargo test` | Unit and integration tests |

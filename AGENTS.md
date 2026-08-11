@@ -11,7 +11,9 @@ No cloud, no Python runtime, no GPU.
 - **Resample**: `audio.rs` windowed-sinc → mono `f32` @ 16 kHz. No `rubato`:
   its `FftFixedOut`, sized per call, returned silence for long buffers.
 - **VAD**: RMS-energy gate in `caption.rs` (threshold / silence / min / max ms
-  from `AsrConfig`).
+  from `AsrConfig`), with pre-roll, tail and a half-threshold hysteresis to keep
+  speech continuous. Never strip the quiet parts out of an utterance: the model
+  answers spliced audio with fluent nonsense, sometimes in the wrong language.
 - **Mel**: `asr/mel.rs` — Whisper log-mel frontend (128 bins, n_fft 400,
   hop 160) on `rustfft`.
 - **ASR**: `asr/model.rs` — `Audio8/ark-asr-0.6b-int8-onnx` on `ort`. Four
@@ -36,6 +38,7 @@ No cloud, no Python runtime, no GPU.
 | `cargo run` | Start the caption server (auto-downloads the model) |
 | `cargo run --bin asr-tool -- inspect` | Print each ONNX graph's inputs/outputs |
 | `cargo run --release --bin asr-tool -- transcribe x.wav` | Transcribe a file |
+| `cargo run --release --bin asr-tool -- vad x.wav [gain]` | Segment through the live VAD, then transcribe each utterance |
 | `cargo check` | Type check |
 | `cargo clippy -- -D warnings` | Lint |
 | `cargo test` | Unit + integration tests |
