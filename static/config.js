@@ -23,7 +23,7 @@
         ['uppercase', 'checkbox'], ['fade_ms', 'number'], ['custom_css', 'text'],
     ];
     const ROOT_FIELDS = [
-        ['language', 'text'], ['threads', 'number'], ['max_new_tokens', 'number'],
+        ['language', 'text'], ['input_device', 'text'], ['threads', 'number'], ['max_new_tokens', 'number'],
         ['vad_threshold', 'float'], ['vad_silence_ms', 'number'],
         ['vad_min_ms', 'number'], ['vad_max_ms', 'number'],
     ];
@@ -97,6 +97,15 @@
     const fillForm = (cfg) => {
         const s = cfg.style;
         $('language').value = cfg.language;
+        // The device list arrives separately; keep the saved value selected
+        // even if the device is currently unplugged.
+        if (!$('input_device').querySelector(`option[value="${CSS.escape(cfg.input_device || '')}"]`)) {
+            const option = document.createElement('option');
+            option.value = cfg.input_device || '';
+            option.textContent = cfg.input_device || 'System default';
+            $('input_device').appendChild(option);
+        }
+        $('input_device').value = cfg.input_device || '';
         $('threads').value = cfg.threads;
         $('max_new_tokens').value = cfg.max_new_tokens;
         $('vad_threshold').value = cfg.vad_threshold;
@@ -156,6 +165,7 @@
         const updated = {
             ...config,
             language: $('language').value,
+            input_device: $('input_device').value,
             threads: +$('threads').value,
             max_new_tokens: +$('max_new_tokens').value,
             vad_threshold: parseFloat($('vad_threshold').value),
@@ -249,14 +259,34 @@
         ws.onerror = () => ws.close();
     };
 
-    fetch('/settings')
+    // Devices first, so fillForm can select the saved one.
+    fetch('/devices')
         .then((r) => r.json())
-        .then((cfg) => {
-            config = cfg;
-            fillForm(cfg);
-            renderPreview();
+        .then((devices) => {
+            const select = $('input_device');
+            select.innerHTML = '';
+            const auto = document.createElement('option');
+            auto.value = '';
+            auto.textContent = 'System default';
+            select.appendChild(auto);
+            for (const device of devices) {
+                const option = document.createElement('option');
+                option.value = device.name;
+                option.textContent = device.default ? `${device.name} (default)` : device.name;
+                select.appendChild(option);
+            }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+            fetch('/settings')
+                .then((r) => r.json())
+                .then((cfg) => {
+                    config = cfg;
+                    fillForm(cfg);
+                    renderPreview();
+                })
+                .catch(() => {});
+        });
 
     refreshStatus();
     setInterval(refreshStatus, 3000);

@@ -53,6 +53,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/caption.png", get(caption_png))
         .route("/settings", get(get_config).post(set_config))
         .route("/status", get(caption_status))
+        .route("/devices", get(list_devices))
         .route("/start", post(start_listening))
         .route("/stop", post(stop_listening))
         .route("/index.js", get(|| async { serve_embedded("index.js") }))
@@ -213,6 +214,21 @@ async fn set_config(
     crate::config::save(&saved);
     let _ = state.style_tx.send(saved.style);
     StatusCode::OK
+}
+
+#[derive(Serialize)]
+struct DeviceEntry {
+    name: String,
+    default: bool,
+}
+
+/// Input devices available for the settings page's picker.
+async fn list_devices() -> impl IntoResponse {
+    let devices: Vec<DeviceEntry> = crate::audio::list_input_devices()
+        .into_iter()
+        .map(|(name, default)| DeviceEntry { name, default })
+        .collect();
+    Json(devices)
 }
 
 #[derive(Serialize)]

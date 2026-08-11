@@ -42,7 +42,7 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
 
     // The whole Microphone (stream + receiver) moves into the thread so the
     // cpal stream stays alive for as long as the pipeline runs.
-    let mic = open_microphone()?;
+    let mic = open_microphone(&config.input_device)?;
     let mic_rate = mic.sample_rate;
 
     let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);

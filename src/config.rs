@@ -82,6 +82,9 @@ pub struct AsrConfig {
     /// Maximum utterance length (in ms) — forces segmentation of long speech.
     #[serde(default = "default_vad_max_ms")]
     pub vad_max_ms: u64,
+    /// Input device name, or empty for the system default.
+    #[serde(default)]
+    pub input_device: String,
     /// Number of ONNX threads used during inference.
     #[serde(default = "default_threads")]
     pub threads: usize,
@@ -101,6 +104,7 @@ impl Default for AsrConfig {
             vad_silence_ms: default_vad_silence_ms(),
             vad_min_ms: default_vad_min_ms(),
             vad_max_ms: default_vad_max_ms(),
+            input_device: String::new(),
             threads: default_threads(),
             style: OverlayStyle::default(),
         }
@@ -206,6 +210,7 @@ mod tests {
             vad_silence_ms: 800,
             vad_min_ms: 500,
             vad_max_ms: 20_000,
+            input_device: String::new(),
             threads: 4,
             style: OverlayStyle::default(),
         };

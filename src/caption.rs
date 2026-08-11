@@ -141,7 +141,21 @@ pub fn run_pipeline(
 
         if let Some(speech) = pipeline.push_chunk(&chunk) {
             let audio_16k = to_stt_rate(&speech, mic_rate)?;
-            log::info!("Utterance: {} ms", speech.len() * 1000 / mic_rate.max(1) as usize);
+
+            // Report the level that actually reaches the model. Silence here
+            // means the capture or resample path is broken, not the model — an
+            // all-zero buffer transcribes to "" with no error at all.
+            let rms = (audio_16k.iter().map(|v| v * v).sum::<f32>()
+                / audio_16k.len().max(1) as f32)
+                .sqrt();
+            log::info!(
+                "Utterance: {} ms, {} samples @16k, rms {rms:.4}",
+                speech.len() * 1000 / mic_rate.max(1) as usize,
+                audio_16k.len()
+            );
+            if rms <= f32::EPSILON {
+                log::warn!("Utterance is silent after resampling — check the input device");
+            }
 
             match asr.transcribe(&audio_16k) {
                 Ok(text) if !text.is_empty() => {
@@ -152,7 +166,7 @@ pub fn run_pipeline(
                         end_ms: 0,
                     });
                 }
-                Ok(_) => log::debug!("Empty transcription"),
+                Ok(_) => log::info!("No speech recognized in this utterance"),
                 Err(e) => log::error!("ASR error: {e}"),
             }
         }

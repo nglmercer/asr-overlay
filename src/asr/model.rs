@@ -78,6 +78,8 @@ pub struct ArkAsr {
     /// Persistent KV cache buffers, reused across utterances.
     caches: Vec<Vec<f32>>,
     max_new_tokens: usize,
+    /// `blocked[id]` = this token may never be generated. Indexed by token id.
+    blocked: Vec<bool>,
     /// Instruction given to the decoder after the audio. ARK-ASR is an audio
     /// LLM, so this steers what it produces.
     instruction: String,
@@ -121,6 +123,23 @@ impl ArkAsr {
             .map(|_| vec![0.0f32; meta.cache_elements()])
             .collect();
 
+        // Mirror `build_bad_token_ids`: block every added `<|...|>` token
+        // except EOS, which is how generation is meant to terminate.
+        let mut blocked = vec![false; BLOCK_TOKEN_ID_FROM];
+        let mut blocked_count = 0usize;
+        for (token, id) in tokenizer.get_added_vocabulary().get_vocab() {
+            let id = *id;
+            let id = id as usize;
+            if id >= BLOCK_TOKEN_ID_FROM || id == manifest.im_end_token_id as usize {
+                continue;
+            }
+            if token.starts_with('<') && token.ends_with('>') {
+                blocked[id] = true;
+                blocked_count += 1;
+            }
+        }
+        log::debug!("ASR: blocked {blocked_count} special tokens (EOS stays selectable)");
+
         log::info!(
             "ARK-ASR ready: {} layers, hidden {}, cache {} tokens",
             meta.num_layers,
@@ -139,6 +158,7 @@ impl ArkAsr {
             llm,
             caches,
             max_new_tokens,
+            blocked,
             instruction: DEFAULT_INSTRUCTION.to_string(),
         })
     }
@@ -288,26 +308,25 @@ impl ArkAsr {
     }
 
     /// Greedy argmax over the allowed token range.
-    /// Ported from `AsrLogitsMask`: everything at or above
-    /// `BLOCK_TOKEN_ID_FROM` is suppressed so the model emits text, not
-    /// control tokens.
+    ///
+    /// Ported from `AsrLogitsMask` + `build_bad_token_ids`: ids at or above
+    /// `BLOCK_TOKEN_ID_FROM` and every special token except EOS are suppressed.
+    ///
+    /// Blocking the specials matters. `<|user|>` and the pad token are also
+    /// stop tokens, and the model often scores them just below the real first
+    /// word — if they stay selectable, decoding stops immediately and the
+    /// transcript comes back empty.
     fn pick_token(&self, logits: &[f32]) -> i64 {
         let limit = logits.len().min(BLOCK_TOKEN_ID_FROM);
         let mut best = 0usize;
         let mut best_score = f32::NEG_INFINITY;
         for (id, &score) in logits[..limit].iter().enumerate() {
+            if self.blocked[id] {
+                continue;
+            }
             if score > best_score {
                 best_score = score;
                 best = id;
-            }
-        }
-        // The stop tokens live above the block threshold, so they are checked
-        // separately — otherwise generation could never terminate.
-        for &stop in &self.manifest.stop_token_ids {
-            let idx = stop as usize;
-            if idx < logits.len() && logits[idx] > best_score {
-                best_score = logits[idx];
-                best = idx;
             }
         }
         best as i64

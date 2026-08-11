@@ -15,21 +15,62 @@ pub struct Microphone {
     stream: cpal::Stream,
 }
 
-/// Open the default input device and start streaming.
-///
-/// `chunk_samples` controls how many mono samples each channel message
-/// carries (a sensible default is one CPAL buffer, whatever the device chose).
-pub fn open_microphone() -> Result<Microphone> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow!("No default input device found"))?;
-
-    let device_name = device
+/// Human-readable name of an input device, or a fallback.
+fn device_name(device: &cpal::Device) -> String {
+    device
         .description()
         .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "unknown".into());
-    log::info!("Input device: {device_name}");
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+/// Every input device the host exposes, with the default listed first.
+///
+/// Returned as `(name, is_default)` so the settings page can label the default
+/// without guessing.
+pub fn list_input_devices() -> Vec<(String, bool)> {
+    let host = cpal::default_host();
+    let default = host.default_input_device().map(|d| device_name(&d));
+
+    let Ok(devices) = host.input_devices() else {
+        return default.into_iter().map(|n| (n, true)).collect();
+    };
+
+    let mut out = Vec::new();
+    for device in devices {
+        let name = device_name(&device);
+        // Skip duplicates: some hosts list the same device more than once.
+        if out.iter().any(|(existing, _)| existing == &name) {
+            continue;
+        }
+        let is_default = Some(&name) == default.as_ref();
+        out.push((name, is_default));
+    }
+    out.sort_by_key(|(name, is_default)| (!*is_default, name.clone()));
+    out
+}
+
+/// Open an input device by name and start streaming.
+///
+/// An empty or unmatched name falls back to the host default, so a config
+/// naming a device that was unplugged still starts.
+pub fn open_microphone(preferred: &str) -> Result<Microphone> {
+    let host = cpal::default_host();
+
+    let device = match preferred.trim() {
+        "" => None,
+        wanted => host
+            .input_devices()
+            .ok()
+            .and_then(|mut devices| devices.find(|d| device_name(d) == wanted))
+            .or_else(|| {
+                log::warn!("Input device {wanted:?} not found; using the default");
+                None
+            }),
+    }
+    .or_else(|| host.default_input_device())
+    .ok_or_else(|| anyhow!("No input device found"))?;
+
+    log::info!("Input device: {}", device_name(&device));
 
     let default_config = device.default_input_config()?;
     let sample_rate = default_config.sample_rate();
