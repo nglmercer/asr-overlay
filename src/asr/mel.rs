@@ -122,7 +122,7 @@ impl MelExtractor {
     /// `max(((mel_frames + 1) / 2) / merge_factor, 1)`.
     pub fn num_audio_tokens(n_samples: usize, merge_factor: usize) -> usize {
         let mel_frames = Self::num_frames(n_samples);
-        let downsampled = (mel_frames + 1) / 2;
+        let downsampled = mel_frames.div_ceil(2);
         (downsampled / merge_factor.max(1)).max(1)
     }
 
@@ -273,8 +273,12 @@ mod tests {
         let (mel, frames) = extractor.features(&samples);
         assert_eq!(frames, 100);
         assert_eq!(mel.len(), N_MELS * frames);
-        // The normalization caps the range at [-1, 1].
-        assert!(mel.iter().all(|v| (-1.0..=1.0).contains(v)), "out of range");
+        assert!(mel.iter().all(|v| v.is_finite()));
+        // The floor is `max - 8` decades and everything is divided by 4, so the
+        // spread is exactly 2.0 regardless of how loud the input is.
+        let max = mel.iter().cloned().fold(f32::MIN, f32::max);
+        let min = mel.iter().cloned().fold(f32::MAX, f32::min);
+        assert!((max - min - 2.0).abs() < 1e-5, "span was {}", max - min);
         // A 440 Hz tone must put its peak in a low mel band, not a high one.
         let band_energy = |m: usize| mel[m * frames..(m + 1) * frames].iter().sum::<f32>();
         assert!(band_energy(10) > band_energy(120));

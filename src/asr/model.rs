@@ -12,7 +12,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::path::Path;
@@ -78,12 +78,13 @@ pub struct ArkAsr {
 }
 
 fn open_session(path: &Path, threads: usize) -> Result<Session> {
-    Session::builder()
-        .context("Failed to create ONNX session builder")?
+    let mut builder = Session::builder()
+        .map_err(|e| anyhow!("Failed to create ONNX session builder: {e}"))?
         .with_intra_threads(threads)
-        .context("Failed to set ONNX thread count")?
+        .map_err(|e| anyhow!("Failed to set ONNX thread count: {e}"))?;
+    builder
         .commit_from_file(path)
-        .with_context(|| format!("Failed to load ONNX model {}", path.display()))
+        .map_err(|e| anyhow!("Failed to load ONNX model {}: {e}", path.display()))
 }
 
 impl ArkAsr {
@@ -229,28 +230,28 @@ impl ArkAsr {
         ));
 
         let cache_shape = [
-            1usize,
-            max_total,
-            self.meta.num_key_value_heads,
-            self.meta.head_dim(),
+            1i64,
+            max_total as i64,
+            self.meta.num_key_value_heads as i64,
+            self.meta.head_dim() as i64,
         ];
-        for layer in 0..self.meta.num_layers {
+        // Borrow the caches instead of copying them: at 48 tensors of
+        // max_total × 2 × 64 floats each, cloning per token would move
+        // ~200 MB per generated token.
+        let Self { llm, caches, .. } = self;
+        for (layer, cache) in caches.iter().enumerate() {
+            let name = if layer % 2 == 0 {
+                format!("cache_key_{}", layer / 2)
+            } else {
+                format!("cache_value_{}", layer / 2)
+            };
             feeds.push((
-                format!("cache_key_{layer}").into(),
-                Tensor::from_array((cache_shape, self.caches[2 * layer].clone().into_boxed_slice()))?
-                    .into(),
-            ));
-            feeds.push((
-                format!("cache_value_{layer}").into(),
-                Tensor::from_array((
-                    cache_shape,
-                    self.caches[2 * layer + 1].clone().into_boxed_slice(),
-                ))?
-                .into(),
+                name.into(),
+                TensorRef::from_array_view((cache_shape, cache.as_slice()))?.into(),
             ));
         }
 
-        let outputs = self.llm.run(feeds)?;
+        let outputs = llm.run(feeds)?;
 
         // outputs[0] = logits, outputs[1..] = per-layer key/value deltas.
         let (logits_shape, logits) = outputs[0].try_extract_tensor::<f32>()?;
@@ -258,12 +259,12 @@ impl ArkAsr {
         let logits = logits[logits.len() - vocab..].to_vec();
 
         let stride = self.meta.num_key_value_heads * self.meta.head_dim();
-        for layer in 0..self.meta.num_layers * 2 {
+        let offset = start_pos * stride;
+        let len = seq * stride;
+        for (layer, cache) in caches.iter_mut().enumerate() {
             let (_, delta) = outputs[layer + 1].try_extract_tensor::<f32>()?;
-            let offset = start_pos * stride;
-            let len = seq * stride;
-            if offset + len <= self.caches[layer].len() && delta.len() >= len {
-                self.caches[layer][offset..offset + len].copy_from_slice(&delta[..len]);
+            if offset + len <= cache.len() && delta.len() >= len {
+                cache[offset..offset + len].copy_from_slice(&delta[..len]);
             }
         }
 
@@ -307,7 +308,9 @@ impl ArkAsr {
             cache.fill(0.0);
         }
 
+        let encode_started = std::time::Instant::now();
         let (audio_embeds, n_audio) = self.encode_audio(samples)?;
+        let encode_ms = encode_started.elapsed().as_millis();
         if n_audio == 0 {
             return Ok(String::new());
         }
@@ -345,11 +348,14 @@ impl ArkAsr {
             audio_slot += 1;
         }
 
+        let prefill_started = std::time::Instant::now();
         let mut logits = self.forward(embeds, prompt_len, 0)?;
-        let mut total_len = prompt_len;
+        let prefill_ms = prefill_started.elapsed().as_millis();
+        let decode_started = std::time::Instant::now();
+
         let mut out_ids: Vec<u32> = Vec::new();
 
-        for _ in 0..self.max_new_tokens {
+        for total_len in prompt_len..prompt_len + self.max_new_tokens {
             let next = self.pick_token(&logits);
             if self.manifest.stop_token_ids.contains(&next) {
                 break;
@@ -357,8 +363,14 @@ impl ArkAsr {
             out_ids.push(next as u32);
             let embed = self.embed(&[next])?;
             logits = self.forward(embed, 1, total_len)?;
-            total_len += 1;
         }
+
+        log::debug!(
+            "ASR timing: encode {encode_ms} ms, prefill {prefill_ms} ms ({prompt_len} tok), \
+             decode {} ms ({} tok)",
+            decode_started.elapsed().as_millis(),
+            out_ids.len()
+        );
 
         let text = self
             .tokenizer

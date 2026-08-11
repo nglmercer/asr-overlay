@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OBS overlay that detects speech and generates live subtitles, CPU-only"
 authors = ["asr-overlay contributors"]
 edition = "2021"
+default-run = "asr-overlay"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -26,6 +27,7 @@ crossbeam-channel = "0.5"
 
 # ONNX Runtime — powers both ASR (ARK-ASR INT8) and TTS (Audio8 INT4)
 ort = { version = "2.0.0-rc.13", default-features = false, features = [
+    "std",
     "download-binaries",
     "tls-rustls",
 ] }
