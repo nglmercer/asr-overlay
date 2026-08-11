@@ -15,6 +15,28 @@ pub struct Microphone {
     stream: cpal::Stream,
 }
 
+/// A microphone the settings page can offer.
+///
+/// `id` is what the config stores: either `pw:<node>` for a sound-server source
+/// or a cpal device id such as `alsa:pipewire`. Ids are stable across runs,
+/// unlike display names — several ALSA entries share one name.
+#[derive(Debug, Clone)]
+pub struct InputDevice {
+    pub id: String,
+    pub label: String,
+    pub default: bool,
+}
+
+/// Prefix marking a PipeWire/PulseAudio source rather than a raw cpal device.
+const SOURCE_PREFIX: &str = "pw:";
+
+/// The ALSA PCM that routes through PipeWire. Opening it with `PIPEWIRE_NODE`
+/// set captures from that specific source.
+const PIPEWIRE_DEVICE_ID: &str = "alsa:pipewire";
+
+/// ALSA's `null` PCM: it "captures" silence, so it is never a useful mic.
+const NULL_DEVICE_ID: &str = "alsa:null";
+
 /// Human-readable name of an input device, or a fallback.
 fn device_name(device: &cpal::Device) -> String {
     device
@@ -23,70 +45,291 @@ fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
-/// Every input device the host exposes, with the default listed first.
-///
-/// Returned as `(name, is_default)` so the settings page can label the default
-/// without guessing.
-pub fn list_input_devices() -> Vec<(String, bool)> {
-    let host = cpal::default_host();
-    let default = host.default_input_device().map(|d| device_name(&d));
+/// Stable id of a device, e.g. `alsa:hw:CARD=0,DEV=0`.
+fn device_id(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.to_string())
+}
 
-    let Ok(devices) = host.input_devices() else {
-        return default.into_iter().map(|n| (n, true)).collect();
-    };
-
-    let mut out = Vec::new();
-    for device in devices {
-        let name = device_name(&device);
-        // Skip duplicates: some hosts list the same device more than once.
-        if out.iter().any(|(existing, _)| existing == &name) {
-            continue;
-        }
-        let is_default = Some(&name) == default.as_ref();
-        out.push((name, is_default));
+/// Ask `pactl` something, with output in the C locale so keys are not
+/// translated. `None` when there is no sound server (or no `pactl`).
+fn pactl(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("pactl")
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
-    out.sort_by_key(|(name, is_default)| (!*is_default, name.clone()));
+    String::from_utf8(output.stdout).ok()
+}
+
+/// Capture sources known to PipeWire/PulseAudio, as `(node, description)`.
+///
+/// These are the devices users actually think of as microphones. The raw ALSA
+/// entries for the same hardware are usually unopenable while the sound server
+/// holds the card, so routing through the server is what makes selection work.
+fn server_sources() -> Vec<(String, String)> {
+    match pactl(&["list", "sources"]) {
+        Some(listing) => parse_sources(&listing),
+        None => Vec::new(),
+    }
+}
+
+/// Pull `(node, description)` pairs out of `pactl list sources`.
+fn parse_sources(listing: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut node: Option<String> = None;
+    for line in listing.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("Name: ") {
+            node = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Description: ") {
+            if let Some(node) = node.take() {
+                // Monitors record what is being played back, not a mic.
+                if node.ends_with(".monitor") {
+                    continue;
+                }
+                let description = value.trim();
+                let label = if description.is_empty() || description == "(null)" {
+                    node.clone()
+                } else {
+                    description.to_string()
+                };
+                out.push((node, label));
+            }
+        }
+    }
     out
 }
 
-/// Open an input device by name and start streaming.
+/// The sound server's default capture source, if any.
+fn default_server_source() -> Option<String> {
+    let name = pactl(&["get-default-source"])?.trim().to_string();
+    (!name.is_empty() && name != "@DEFAULT_SOURCE@").then_some(name)
+}
+
+/// Every microphone worth offering, default first.
 ///
-/// An empty or unmatched name falls back to the host default, so a config
-/// naming a device that was unplugged still starts.
+/// Only devices that can actually be opened for capture are listed: a host like
+/// ALSA advertises dozens of plugin PCMs and busy hardware nodes that fail the
+/// moment you try to record from them.
+pub fn list_input_devices() -> Vec<InputDevice> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+
+    let mut probed: Vec<(String, String)> = Vec::new();
+    for device in devices {
+        let Some(id) = device_id(&device) else {
+            continue;
+        };
+        if id == NULL_DEVICE_ID || probed.iter().any(|(existing, _)| existing == &id) {
+            continue;
+        }
+        if device.default_input_config().is_err() {
+            continue;
+        }
+        probed.push((id, device_name(&device)));
+    }
+
+    let mut out = Vec::new();
+    let mut has_default = false;
+
+    // Sound-server sources first: on PipeWire/PulseAudio they are the only way
+    // to pick a specific microphone.
+    if probed.iter().any(|(id, _)| id == PIPEWIRE_DEVICE_ID) {
+        let default_source = default_server_source();
+        for (node, label) in server_sources() {
+            let is_default = Some(&node) == default_source.as_ref();
+            has_default |= is_default;
+            out.push(InputDevice {
+                id: format!("{SOURCE_PREFIX}{node}"),
+                label,
+                default: is_default,
+            });
+        }
+    }
+
+    let host_default = host.default_input_device().and_then(|d| device_id(&d));
+    for (id, label) in probed {
+        let is_default = !has_default && Some(&id) == host_default.as_ref();
+        has_default |= is_default;
+        out.push(InputDevice {
+            id,
+            label,
+            default: is_default,
+        });
+    }
+
+    out.sort_by_key(|device| (!device.default, device.label.to_lowercase()));
+    out
+}
+
+/// Map a saved value written before device ids existed onto a current device.
+///
+/// Old configs stored the display name, which ALSA hands to several devices at
+/// once and which the sound server decorates ("… Analog Stereo"). Returns the
+/// id to migrate to, or `None` when the value is already an id, is empty, or
+/// matches nothing.
+pub fn resolve_device_id(saved: &str) -> Option<String> {
+    let saved = saved.trim();
+    if saved.is_empty() || saved.starts_with(SOURCE_PREFIX) {
+        return None;
+    }
+
+    let devices = list_input_devices();
+    if devices.iter().any(|d| d.id == saved) {
+        return None;
+    }
+
+    let wanted = saved.to_lowercase();
+    devices
+        .iter()
+        .find(|d| d.label.to_lowercase() == wanted)
+        .or_else(|| {
+            devices.iter().find(|d| {
+                let label = d.label.to_lowercase();
+                label.starts_with(&wanted) || wanted.starts_with(&label)
+            })
+        })
+        .map(|d| d.id.clone())
+}
+
+/// Devices matching a saved config value, best match first.
+///
+/// Accepts a cpal device id and, for configs written before ids were stored, a
+/// display name — which can match more than one device, so all are returned.
+fn matching_devices(host: &cpal::Host, preferred: &str) -> Vec<cpal::Device> {
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+    devices
+        .filter(|d| {
+            device_id(d).as_deref() == Some(preferred) || device_name(d) == preferred
+        })
+        .collect()
+}
+
+/// Open an input device and start streaming.
+///
+/// Tries the configured device first, then the host default, then anything that
+/// opens: a mic that was unplugged, renamed, or grabbed by another app must not
+/// leave the overlay unable to listen at all.
 pub fn open_microphone(preferred: &str) -> Result<Microphone> {
     let host = cpal::default_host();
+    let preferred = preferred.trim();
+    let mut failures: Vec<String> = Vec::new();
+    let mut tried: Vec<String> = Vec::new();
 
-    let device = match preferred.trim() {
-        "" => None,
-        wanted => host
-            .input_devices()
-            .ok()
-            .and_then(|mut devices| devices.find(|d| device_name(d) == wanted))
-            .or_else(|| {
-                log::warn!("Input device {wanted:?} not found; using the default");
-                None
-            }),
+    if let Some(node) = preferred.strip_prefix(SOURCE_PREFIX) {
+        match open_source(&host, node) {
+            Ok(mic) => return Ok(mic),
+            Err(e) => {
+                log::warn!("Source {node:?} unavailable ({e}); falling back");
+                failures.push(format!("{node}: {e}"));
+            }
+        }
+    } else if !preferred.is_empty() {
+        for device in matching_devices(&host, preferred) {
+            match try_open(&device, &mut tried) {
+                Ok(mic) => return Ok(mic),
+                Err(e) => {
+                    log::warn!("Input device {preferred:?} failed to open ({e})");
+                    failures.push(format!("{preferred}: {e}"));
+                }
+            }
+        }
+        if failures.is_empty() {
+            log::warn!("Input device {preferred:?} not found");
+            failures.push(format!("{preferred}: not found"));
+        }
+        log::warn!("Falling back to another input device");
     }
-    .or_else(|| host.default_input_device())
-    .ok_or_else(|| anyhow!("No input device found"))?;
 
-    log::info!("Input device: {}", device_name(&device));
+    if let Some(device) = host.default_input_device() {
+        match try_open(&device, &mut tried) {
+            Ok(mic) => return Ok(mic),
+            Err(e) => failures.push(format!("default device: {e}")),
+        }
+    }
+
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            if device_id(&device).as_deref() == Some(NULL_DEVICE_ID) {
+                continue;
+            }
+            match try_open(&device, &mut tried) {
+                Ok(mic) => return Ok(mic),
+                Err(e) => failures.push(format!("{}: {e}", device_name(&device))),
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "No usable input device. Tried: {}",
+        if failures.is_empty() {
+            "none found".to_string()
+        } else {
+            failures.join("; ")
+        }
+    ))
+}
+
+/// Capture a specific PipeWire source.
+///
+/// The PipeWire ALSA plugin reads `PIPEWIRE_NODE` while the PCM is being
+/// opened, which is the only handle cpal's ALSA host gives us for picking a
+/// source. The variable is removed again as soon as the stream exists.
+fn open_source(host: &cpal::Host, node: &str) -> Result<Microphone> {
+    let device = host
+        .input_devices()
+        .ok()
+        .and_then(|mut devices| {
+            devices.find(|d| device_id(d).as_deref() == Some(PIPEWIRE_DEVICE_ID))
+        })
+        .ok_or_else(|| anyhow!("PipeWire is not available on this host"))?;
+
+    // PipeWire silently falls back to the default source for an unknown node,
+    // so say so rather than letting the wrong mic look like a bug.
+    let sources = server_sources();
+    if !sources.is_empty() && !sources.iter().any(|(name, _)| name == node) {
+        log::warn!("Source {node:?} is not connected; PipeWire will use its default");
+    }
+
+    std::env::set_var("PIPEWIRE_NODE", node);
+    let result = try_open(&device, &mut Vec::new());
+    std::env::remove_var("PIPEWIRE_NODE");
+    if result.is_ok() {
+        log::info!("Capturing from source: {node}");
+    }
+    result
+}
+
+/// Open one device, skipping it if it was already attempted this call.
+fn try_open(device: &cpal::Device, tried: &mut Vec<String>) -> Result<Microphone> {
+    if let Some(id) = device_id(device) {
+        if tried.contains(&id) {
+            return Err(anyhow!("already tried"));
+        }
+        tried.push(id);
+    }
 
     let default_config = device.default_input_config()?;
     let sample_rate = default_config.sample_rate();
     let channels = default_config.channels();
     let sample_format = default_config.sample_format();
-    log::info!("Input config: {sample_rate} Hz, {channels} ch, {sample_format:?}");
 
     let stream_config: StreamConfig = default_config.into();
     let (tx, rx) = crossbeam_channel::unbounded::<AudioChunk>();
 
     let stream = match sample_format {
-        SampleFormat::F32 => build_stream::<f32>(&device, stream_config, tx, channels)?,
-        SampleFormat::I16 => build_stream::<i16>(&device, stream_config, tx, channels)?,
-        SampleFormat::U16 => build_stream::<u16>(&device, stream_config, tx, channels)?,
-        SampleFormat::I32 => build_stream::<i32>(&device, stream_config, tx, channels)?,
-        SampleFormat::U32 => build_stream::<u32>(&device, stream_config, tx, channels)?,
+        SampleFormat::F32 => build_stream::<f32>(device, stream_config, tx, channels)?,
+        SampleFormat::I16 => build_stream::<i16>(device, stream_config, tx, channels)?,
+        SampleFormat::U16 => build_stream::<u16>(device, stream_config, tx, channels)?,
+        SampleFormat::I32 => build_stream::<i32>(device, stream_config, tx, channels)?,
+        SampleFormat::U32 => build_stream::<u32>(device, stream_config, tx, channels)?,
         _ => {
             return Err(anyhow!(
                 "Unsupported input sample format: {sample_format:?}"
@@ -95,6 +338,10 @@ pub fn open_microphone(preferred: &str) -> Result<Microphone> {
     };
 
     stream.play()?;
+    log::info!(
+        "Input device: {} ({sample_rate} Hz, {channels} ch, {sample_format:?})",
+        device_name(device)
+    );
     Ok(Microphone {
         sample_rate,
         rx,
@@ -227,6 +474,45 @@ pub fn resample_mono(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_sources_and_skips_monitors() {
+        let listing = "\
+Source #51
+\tState: RUNNING
+\tName: alsa_input.usb-EMEET.analog-stereo
+\tDescription: EMEET SmartCam C960 Ultra Analog Stereo
+\tDriver: PipeWire
+Source #57
+\tName: bluez_output.B0.monitor
+\tDescription: Monitor of UGREEN Studio Pro
+Source #60
+\tName: bluez_input.B0
+\tDescription: UGREEN Studio Pro
+";
+        let sources = parse_sources(listing);
+        assert_eq!(
+            sources,
+            vec![
+                (
+                    "alsa_input.usb-EMEET.analog-stereo".to_string(),
+                    "EMEET SmartCam C960 Ultra Analog Stereo".to_string()
+                ),
+                ("bluez_input.B0".to_string(), "UGREEN Studio Pro".to_string()),
+            ]
+        );
+    }
+
+    /// pactl prints "(null)" for descriptions it cannot encode; the node name
+    /// is still a usable label.
+    #[test]
+    fn parses_sources_without_a_description() {
+        let listing = "\tName: alsa_input.thing\n\tDescription: (null)\n";
+        assert_eq!(
+            parse_sources(listing),
+            vec![("alsa_input.thing".to_string(), "alsa_input.thing".to_string())]
+        );
+    }
 
     #[test]
     fn test_to_mono_f32_avg() {

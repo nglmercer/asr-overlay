@@ -42,6 +42,15 @@ pub struct AppState {
     pub style_tx: broadcast::Sender<OverlayStyle>,
 }
 
+/// True while the pipeline runs, or a start is in flight.
+///
+/// The controller owns the truth: auto-start and the tray drive it without
+/// going through these handlers, so the `listening` field alone would go stale
+/// and, among other things, stop a microphone change from restarting capture.
+fn is_listening(state: &AppState) -> bool {
+    crate::controller::is_listening() || *state.listening.lock() == ListeningState::Starting
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let rl = Arc::new(state.rate_limiters.clone());
 
@@ -219,7 +228,7 @@ async fn set_config(
     crate::config::save(&saved);
     let _ = state.style_tx.send(saved.style);
 
-    if needs_restart && *state.listening.lock() == ListeningState::Listening {
+    if needs_restart && crate::controller::is_listening() {
         // Restarting joins the pipeline thread and reloads the model, so keep
         // it off the async runtime's worker threads.
         let state = Arc::clone(&state);
@@ -238,15 +247,24 @@ async fn set_config(
 
 #[derive(Serialize)]
 struct DeviceEntry {
-    name: String,
+    id: String,
+    label: String,
     default: bool,
 }
 
 /// Input devices available for the settings page's picker.
 async fn list_devices() -> impl IntoResponse {
-    let devices: Vec<DeviceEntry> = crate::audio::list_input_devices()
+    // Probing every device opens PCMs, so keep it off the async worker threads.
+    let devices = tokio::task::spawn_blocking(crate::audio::list_input_devices)
+        .await
+        .unwrap_or_default();
+    let devices: Vec<DeviceEntry> = devices
         .into_iter()
-        .map(|(name, default)| DeviceEntry { name, default })
+        .map(|d| DeviceEntry {
+            id: d.id,
+            label: d.label,
+            default: d.default,
+        })
         .collect();
     Json(devices)
 }
@@ -261,7 +279,7 @@ struct StatusResponse {
 async fn caption_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(StatusResponse {
         running: true,
-        listening: *state.listening.lock() == ListeningState::Listening,
+        listening: is_listening(&state),
         has_caption: state.last_caption.lock().is_some(),
     })
 }
@@ -277,7 +295,7 @@ struct StartResponse {
 async fn start_listening(State(state): State<Arc<AppState>>) -> (StatusCode, Json<StartResponse>) {
     {
         let mut guard = state.listening.lock();
-        if *guard == ListeningState::Listening {
+        if crate::controller::is_listening() || *guard == ListeningState::Starting {
             return (
                 StatusCode::OK,
                 Json(StartResponse {
@@ -290,7 +308,13 @@ async fn start_listening(State(state): State<Arc<AppState>>) -> (StatusCode, Jso
         *guard = ListeningState::Starting;
     }
 
-    let result = crate::controller::start(Arc::clone(&state));
+    // Opening the microphone blocks; keep it off the async worker threads.
+    let starting = Arc::clone(&state);
+    let result = match tokio::task::spawn_blocking(move || crate::controller::start(starting)).await
+    {
+        Ok(result) => result,
+        Err(e) => Err(anyhow::anyhow!("start task failed: {e}")),
+    };
 
     let (ok, error, listening) = match result {
         Ok(()) => (true, None, true),
@@ -342,7 +366,7 @@ async fn stop_listening(State(state): State<Arc<AppState>>) -> Json<StopResponse
     }
     Json(StopResponse {
         ok: true,
-        listening: *state.listening.lock() == ListeningState::Listening,
+        listening: is_listening(&state),
     })
 }
 

@@ -49,14 +49,14 @@ No cloud, no Python runtime, no GPU.
 | GET | `/ws` | WebSocket caption stream + control commands |
 | GET | `/caption.png` | Latest caption as a transparent PNG |
 | GET | `/config` | Settings page with live preview |
-| GET | `/devices` | Available microphones |
+| GET | `/devices` | Available microphones as `{ id, label, default }` |
 | POST | `/style` | Live style preview (not persisted) |
 | GET | `/status` | `{ running, listening, has_caption }` |
 | POST | `/start` | Start listening |
 | POST | `/stop` | Stop listening |
 | GET/POST | `/settings` | Read / update config JSON |
 | GET | `/config` | Settings page with live preview |
-| GET | `/devices` | Available microphones |
+| GET | `/devices` | Available microphones as `{ id, label, default }` |
 | POST | `/style` | Live style preview (not persisted) |
 
 ## Rules

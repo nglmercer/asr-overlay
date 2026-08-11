@@ -51,6 +51,12 @@ async fn main() {
     if cli.no_auto_start {
         config.auto_start = false;
     }
+    // Configs (and `--input-device`) written before stable ids existed name the
+    // device; map that onto a current id so the saved choice keeps working.
+    if let Some(id) = asr_overlay::audio::resolve_device_id(&config.input_device) {
+        log::info!("Microphone {:?} resolved to {id}", config.input_device);
+        config.input_device = id;
+    }
     asr_overlay::config::save(&config);
 
     let (caption_tx, _caption_rx) = tokio::sync::broadcast::channel::<asr_overlay::caption::Caption>(16);

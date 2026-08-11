@@ -102,7 +102,8 @@
         if (!$('input_device').querySelector(`option[value="${CSS.escape(cfg.input_device || '')}"]`)) {
             const option = document.createElement('option');
             option.value = cfg.input_device || '';
-            option.textContent = cfg.input_device || 'System default';
+            const saved = (cfg.input_device || '').replace(/^pw:/, '');
+            option.textContent = saved ? `${saved} (unavailable)` : 'System default';
             $('input_device').appendChild(option);
         }
         $('input_device').value = cfg.input_device || '';
@@ -308,8 +309,8 @@
             select.appendChild(auto);
             for (const device of devices) {
                 const option = document.createElement('option');
-                option.value = device.name;
-                option.textContent = device.default ? `${device.name} (default)` : device.name;
+                option.value = device.id;
+                option.textContent = device.default ? `${device.label} (default)` : device.label;
                 select.appendChild(option);
             }
         })

@@ -163,6 +163,13 @@ Modules:
 Microphone, VAD thresholds, threads and caption styling all live in
 `~/.config/asr-overlay/config.json` — edit them from `/config`.
 
+`input_device` (also `--input-device`) holds an id from `/devices`, not a
+display name: `pw:<node>` for a PipeWire/PulseAudio source, or a cpal device id
+such as `alsa:pipewire`. Empty means "system default". On PipeWire the sound
+server usually holds the sound card, so its sources are the ones that can
+actually be captured — the picker only lists devices that open. A device that
+is gone or busy falls back to the default rather than refusing to listen.
+
 ## HTTP Endpoints
 
 | Method | Path | Description |

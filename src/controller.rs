@@ -17,6 +17,15 @@ struct PipelineHandle {
     stop_tx: crossbeam_channel::Sender<()>,
 }
 
+/// Resets `STARTING` on every exit path from `start`, including errors.
+struct StartGuard;
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        STARTING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// True if the pipeline is currently active.
 pub fn is_listening() -> bool {
     CONTROLLER.lock().is_some()
@@ -35,6 +44,9 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
         // Another caller is starting; treat as success (they will finish).
         return Ok(());
     }
+    // Clears the flag however we leave this function: an early `?` used to
+    // leave it set, so every later start silently did nothing.
+    let _starting = StartGuard;
 
     let config = state.config.lock().clone();
     let caption_tx = state.caption_tx.clone();
@@ -76,7 +88,6 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
         let mut guard = CONTROLLER.lock();
         *guard = Some(PipelineHandle { thread, stop_tx });
     }
-    STARTING.store(false, Ordering::SeqCst);
     log::info!("Listening started");
     Ok(())
 }
