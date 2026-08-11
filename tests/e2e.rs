@@ -1,10 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
 
-use camera_overlay::camera::CameraFrame;
-use camera_overlay::config::CameraConfig;
-use camera_overlay::server::{build_router, AppState};
+use asr_overlay::config::AsrConfig;
+use asr_overlay::server::{build_router, AppState, ListeningState};
 
 fn pick_unused_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -22,16 +20,14 @@ struct TestServer {
 impl TestServer {
     async fn new() -> Self {
         let port = pick_unused_port();
-        let (frame_tx, _rx) = broadcast::channel::<CameraFrame>(32);
-        let (overlay_tx, _overlay_rx) = broadcast::channel::<serde_json::Value>(8);
+        let (caption_tx, _rx) = tokio::sync::broadcast::channel(16);
 
         let state = Arc::new(AppState {
-            config: parking_lot::Mutex::new(CameraConfig::default()),
-            camera: Arc::new(camera_overlay::camera::CameraController::new()),
-            frame_tx,
-            overlay_tx,
-            overlay_state: parking_lot::Mutex::new(serde_json::Value::Null),
-            rate_limiters: camera_overlay::rate_limit::RateLimiters::new(),
+            config: parking_lot::Mutex::new(AsrConfig::default()),
+            caption_tx,
+            last_caption: Arc::new(parking_lot::Mutex::new(None)),
+            listening: parking_lot::Mutex::new(ListeningState::Idle),
+            rate_limiters: asr_overlay::rate_limit::RateLimiters::new(),
         });
 
         let app = build_router(state);
@@ -73,28 +69,23 @@ impl TestServer {
 }
 
 #[tokio::test]
-async fn e2e_status_reports_not_running() {
+async fn e2e_status_reports_not_listening() {
     let server = TestServer::new().await;
     let resp = server.get("status").await;
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["running"], false);
-    assert_eq!(json["has_frame"], false);
+    assert_eq!(json["running"], true);
+    assert_eq!(json["listening"], false);
+    assert_eq!(json["has_caption"], false);
 }
 
 #[tokio::test]
-async fn e2e_serves_all_web_assets_from_the_binary() {
+async fn e2e_serves_overlay_assets_from_the_binary() {
     let server = TestServer::new().await;
 
     for (path, content_type) in [
         ("", "text/html"),
-        ("config", "text/html"),
         ("index.js", "application/javascript"),
-        ("config.js", "application/javascript"),
-        ("chunks/overlay.js", "application/javascript"),
-        ("assets/index.css", "text/css"),
-        ("assets/config.css", "text/css"),
-        ("camera-overlay.svg", "image/svg+xml"),
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), reqwest::StatusCode::OK, "GET /{path}");
@@ -123,7 +114,7 @@ async fn e2e_settings_post_and_get() {
     let resp = server.get("settings").await;
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-    let body = r#"{"port": 8080, "target_fps": 60, "mirror_horizontal": true}"#;
+    let body = r#"{"port": 8080, "language": "en", "vad_threshold": 0.01}"#;
     let resp = server
         .client
         .post(format!("{}/settings", server.base_url))
@@ -137,45 +128,21 @@ async fn e2e_settings_post_and_get() {
     let resp = server.get("settings").await;
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["port"], 8080);
-    assert_eq!(json["target_fps"], 60);
-    assert_eq!(json["mirror_horizontal"], true);
+    assert_eq!(json["language"], "en");
+    assert_eq!(json["vad_threshold"], 0.01);
 }
 
 #[tokio::test]
-async fn e2e_start_missing_camera_returns_error_body() {
+async fn e2e_stop_is_idempotent() {
     let server = TestServer::new().await;
-
-    let body = r#"{"selected_camera_index": 99999, "target_fps": 30, "port": 8080}"#;
     let resp = server
         .client
-        .post(format!("{}/settings", server.base_url))
-        .header("content-type", "application/json")
-        .body(body.to_string())
+        .post(format!("{}/stop", server.base_url))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    let resp = server
-        .client
-        .post(format!("{}/start", server.base_url))
-        .send()
-        .await
-        .unwrap();
-
-    let status = resp.status();
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(json.get("ok").is_some());
-    assert!(json.get("running").is_some());
-    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        assert_eq!(json["ok"], false);
-        assert!(
-            json["error"]
-                .as_str()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
-            "error message required on failure"
-        );
-        assert_eq!(json["running"], false);
-    }
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["listening"], false);
 }

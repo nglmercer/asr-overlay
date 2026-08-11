@@ -6,7 +6,6 @@ use tray_icon::{
     Icon, TrayIconBuilder,
 };
 
-use crate::camera::CameraController;
 use crate::server::AppState;
 
 fn make_icon() -> Icon {
@@ -27,14 +26,14 @@ pub fn create_tray(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::e
 
         let icon = make_icon();
 
-        let start_stop = MenuItem::new("Start Camera", true, None);
-        let open_config = MenuItem::new("Open Config", true, None);
+        let start_stop = MenuItem::new("Start Listening", true, None);
+        let open_overlay = MenuItem::new("Open Overlay", true, None);
         let restart = MenuItem::new("Restart", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
         let _ = menu.append(&start_stop);
-        let _ = menu.append(&open_config);
+        let _ = menu.append(&open_overlay);
         let _ = menu.append(&MenuItem::new("", false, None));
         let _ = menu.append(&restart);
         let _ = menu.append(&MenuItem::new("", false, None));
@@ -42,7 +41,7 @@ pub fn create_tray(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::e
 
         let _tray = match TrayIconBuilder::new()
             .with_icon(icon)
-            .with_tooltip("Camera Overlay")
+            .with_tooltip("ASR Overlay")
             .with_menu(Box::new(menu))
             .build()
         {
@@ -56,7 +55,7 @@ pub fn create_tray(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::e
         log::info!("Tray icon created");
 
         let start_stop_clone = start_stop.clone();
-        let open_config_clone = open_config.clone();
+        let open_overlay_clone = open_overlay.clone();
         let restart_clone = restart.clone();
         let quit_clone = quit.clone();
         let state_clone = Arc::clone(&state);
@@ -66,33 +65,20 @@ pub fn create_tray(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::e
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(event) = MenuEvent::receiver().try_recv() {
                 if event.id() == start_stop_clone.id() {
-                    let camera = Arc::clone(&state_clone.camera);
-                    if camera.is_stopping() {
-                        continue;
-                    }
-
-                    if camera.is_running() || camera.is_starting() {
-                        log::info!("Tray requested camera stop");
-                        std::thread::spawn(move || camera.stop());
+                    if crate::controller::is_listening() {
+                        log::info!("Tray requested stop");
+                        crate::controller::stop();
                     } else {
-                        let frame_tx = state_clone.frame_tx.clone();
-                        let snapshot = {
-                            let config = state_clone.config.lock();
-                            crate::camera::CameraConfigSnapshot {
-                                camera_index: config.selected_camera_index.unwrap_or(0),
-                                resolution: config.resolution.clone(),
-                                target_fps: config.target_fps,
-                            }
-                        };
-                        log::info!("Tray requested camera start");
+                        log::info!("Tray requested start");
+                        let state = Arc::clone(&state_clone);
                         std::thread::spawn(move || {
-                            if let Err(error) = camera.start(frame_tx, snapshot) {
-                                log::warn!("Camera start did not complete: {error}");
+                            if let Err(e) = crate::controller::start(state) {
+                                log::warn!("Listening did not start: {e}");
                             }
                         });
                     }
-                } else if event.id() == open_config_clone.id() {
-                    let url = format!("http://localhost:{port}/config");
+                } else if event.id() == open_overlay_clone.id() {
+                    let url = format!("http://localhost:{port}/");
                     let _ = open::that(url);
                 } else if event.id() == restart_clone.id() {
                     let _ = std::process::Command::new(std::env::current_exe().unwrap()).spawn();
@@ -102,7 +88,7 @@ pub fn create_tray(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::e
                 }
             }
 
-            sync_start_stop_item(&start_stop_clone, &state_clone.camera);
+            sync_start_stop_item(&start_stop_clone);
             glib::ControlFlow::Continue
         });
 
@@ -112,22 +98,19 @@ pub fn create_tray(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-fn sync_start_stop_item(item: &MenuItem, camera: &CameraController) {
-    let (text, enabled) = if camera.is_stopping() {
-        ("Stopping Camera…", false)
-    } else if camera.is_starting() {
-        ("Starting Camera…", true)
-    } else if camera.is_running() {
-        ("Stop Camera", true)
+fn sync_start_stop_item(item: &MenuItem) {
+    let listening = crate::controller::is_listening();
+    let text = if listening {
+        "Stop Listening"
     } else {
-        ("Start Camera", true)
+        "Start Listening"
     };
 
     if item.text() != text {
         item.set_text(text);
     }
-    if item.is_enabled() != enabled {
-        item.set_enabled(enabled);
+    if !item.is_enabled() {
+        item.set_enabled(true);
     }
 }
 

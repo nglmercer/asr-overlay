@@ -1,61 +1,70 @@
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
-/// Bounded ring of recent frames. The MJPEG handler drains to the *latest*
-/// frame on every emit, so capacity only bounds memory/transient jitter — it
-/// no longer controls latency. 4 keeps RSS low while tolerating brief stalls.
-const BROADCAST_CAPACITY: usize = 4;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(name = "asr-overlay", version, about = "OBS overlay that detects speech and generates live subtitles")]
+struct Cli {
+    /// Whisper ggml model file.
+    #[arg(long, default_value = "models/whisper/ggml-small.bin")]
+    model: String,
+
+    /// Transcription language.
+    #[arg(long, default_value = "es")]
+    language: String,
+
+    /// HTTP port for the overlay.
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+
+    /// Auto-start listening on launch.
+    #[arg(long)]
+    no_auto_start: bool,
+}
 
 #[tokio::main]
 async fn main() {
-    camera_overlay::logger::init();
+    asr_overlay::logger::init();
 
-    let mut config = camera_overlay::config::load();
-    if let Ok(port) = std::env::var("CAMERA_OVERLAY_PORT") {
-        match port.parse::<u16>() {
-            Ok(port) if port >= 1024 => config.port = port,
-            _ => log::warn!("Ignoring invalid CAMERA_OVERLAY_PORT={port}"),
-        }
-    }
-    let camera = Arc::new(camera_overlay::camera::CameraController::new());
-    let (frame_tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let (overlay_tx, _overlay_rx) = broadcast::channel::<serde_json::Value>(8);
+    let cli = Cli::parse();
 
-    let state = Arc::new(camera_overlay::server::AppState {
+    let mut config = asr_overlay::config::load();
+    config.model_path = cli.model;
+    config.language = cli.language;
+    config.port = cli.port;
+    config.auto_start = !cli.no_auto_start;
+    asr_overlay::config::save(&config);
+
+    let (caption_tx, _caption_rx) = tokio::sync::broadcast::channel::<asr_overlay::caption::Caption>(16);
+
+    let state = Arc::new(asr_overlay::server::AppState {
         config: parking_lot::Mutex::new(config.clone()),
-        camera: Arc::clone(&camera),
-        frame_tx: frame_tx.clone(),
-        overlay_tx,
-        overlay_state: parking_lot::Mutex::new(serde_json::Value::Null),
-        rate_limiters: camera_overlay::rate_limit::RateLimiters::new(),
+        caption_tx,
+        last_caption: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        listening: parking_lot::Mutex::new(asr_overlay::server::ListeningState::Idle),
+        rate_limiters: asr_overlay::rate_limit::RateLimiters::new(),
     });
 
     let port = config.port;
     let addr = format!("0.0.0.0:{port}");
 
-    log::info!("Camera server running at http://localhost:{port}");
-    log::info!("Overlay:   http://localhost:{port}/");
-    log::info!("Config:    http://localhost:{port}/config");
-    log::info!("WS Stream: ws://localhost:{port}/ws");
-    log::info!("Add the overlay URL as a Browser Source in OBS");
+    log::info!("ASR Overlay running at http://localhost:{port}");
+    log::info!("Overlay (OBS Browser Source): http://localhost:{port}/");
+    log::info!("Model:  {}", config.model_path);
+    log::info!("Lang:   {}", config.language);
 
-    if let Err(e) = camera_overlay::tray::create_tray(Arc::clone(&state), port) {
+    if let Err(e) = asr_overlay::tray::create_tray(Arc::clone(&state), port) {
         log::warn!("Failed to create tray icon: {e}");
     }
 
     if config.auto_start {
-        let snapshot = camera_overlay::camera::CameraConfigSnapshot {
-            camera_index: config.selected_camera_index.unwrap_or(0),
-            resolution: config.resolution.clone(),
-            target_fps: config.target_fps,
-        };
-        match camera.start(frame_tx.clone(), snapshot) {
-            Ok(()) => log::info!("Auto-start: camera running"),
-            Err(e) => log::error!("Auto-start failed: {e}"),
+        log::info!("Auto-start: listening");
+        if let Err(e) = asr_overlay::controller::start(Arc::clone(&state)) {
+            log::error!("Auto-start failed: {e}");
         }
     }
 
-    let app = camera_overlay::server::build_router(state);
+    let app = asr_overlay::server::build_router(state);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {

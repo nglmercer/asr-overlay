@@ -3,13 +3,49 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Camera Overlay</title>
-    <link rel="icon" type="image/svg+xml" href="/camera-overlay.svg">
-  <script type="module" crossorigin src="/index.js"></script>
-  <link rel="modulepreload" crossorigin href="/chunks/overlay.js">
-  <link rel="stylesheet" crossorigin href="/assets/index.css">
+    <title>ASR Overlay</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            overflow: hidden;
+        }
+        #caption {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 40px;
+            padding: 0 24px;
+            text-align: center;
+            font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+            font-size: 28px;
+            font-weight: 600;
+            color: #fff;
+            text-shadow: 0 2px 6px rgba(0,0,0,0.9), 0 0 2px #000;
+            opacity: 0;
+            transition: opacity 0.2s ease-in;
+            word-wrap: break-word;
+        }
+        #caption.visible { opacity: 1; }
+        #status {
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            font-family: monospace;
+            font-size: 12px;
+            color: rgba(255,255,255,0.6);
+            text-shadow: 0 1px 2px #000;
+            display: none;
+        }
+        #status.live { color: rgba(80,255,120,0.9); }
+    </style>
 </head>
 <body>
-    <canvas id="camera-canvas"></canvas>
+    <div id="caption"></div>
+    <div id="status">connecting…</div>
+    <script src="/index.js"></script>
 </body>
 </html>

@@ -1,31 +1,50 @@
 [package]
-name = "camera-overlay"
+name = "asr-overlay"
 version = "0.1.0"
-description = "Webcam overlay served over HTTP for OBS browser source"
-authors = ["camera-overlay contributors"]
+description = "OBS overlay that detects speech and generates live subtitles, CPU-only"
+authors = ["asr-overlay contributors"]
 edition = "2021"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }
-tray-icon = "0.20"
-gtk = "0.18"
-glib = "0.18"
-nokhwa = { version = "0.10", features = ["input-native"] }
-image = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 log = "0.4"
 env_logger = "0.11"
-once_cell = "1"
 parking_lot = "0.12"
 bytes = "1"
-tokio-stream = { version = "0.1", features = ["sync"] }
+
+# audio capture
+cpal = "0.18"
+# resampling
+rubato = "0.14"
+# STT
+whisper-rs = "0.16"
+# WAV debug output
+hound = "3.5"
+# audio callbacks → worker threads
+crossbeam-channel = "0.5"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# errors
+anyhow = "1"
+thiserror = "2"
+
+# system tray
+tray-icon = "0.20"
+gtk = "0.18"
+glib = "0.18"
+image = "0.25"
+open = "5"
+
+# rate limiting
 governor = "0.8"
 nonzero_ext = "0.3"
-open = "5"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

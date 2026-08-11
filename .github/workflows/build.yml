@@ -25,7 +25,7 @@ on:
         type: boolean
 
 env:
-  APP_NAME: camera-overlay
+  APP_NAME: asr-overlay
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev pkg-config
+          sudo apt-get install -y libasound2-dev pkg-config cmake build-essential libgtk-3-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -48,18 +48,6 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-
-      - name: Install web dependencies
-        run: npm ci || npm install
-
-      - name: Build web assets
-        run: npm run build:web
 
       - name: Run cargo check
         run: cargo check --all-targets
@@ -79,16 +67,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: camera-overlay-linux-x86_64
-            asset_path: target/release/camera-overlay
+            artifact_name: asr-overlay-linux-x86_64
+            asset_path: target/release/asr-overlay
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: camera-overlay-windows-x86_64.exe
-            asset_path: target/release/camera-overlay.exe
+            artifact_name: asr-overlay-windows-x86_64.exe
+            asset_path: target/release/asr-overlay.exe
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: camera-overlay-macos-arm64
-            asset_path: target/release/camera-overlay
+            artifact_name: asr-overlay-macos-arm64
+            asset_path: target/release/asr-overlay
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -99,7 +87,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev pkg-config
+          sudo apt-get install -y libasound2-dev pkg-config cmake build-essential libgtk-3-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -108,18 +96,6 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-
-      - name: Install web dependencies
-        run: npm ci || npm install
-
-      - name: Build web assets
-        run: npm run build:web
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
