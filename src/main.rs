@@ -5,13 +5,13 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "asr-overlay", version, about = "OBS overlay that detects speech and generates live subtitles")]
 struct Cli {
-    /// Whisper ggml model file.
-    #[arg(long, default_value = "models/whisper/ggml-small.bin")]
-    model: String,
-
-    /// Transcription language.
-    #[arg(long, default_value = "es")]
+    /// Language hint. ARK-ASR auto-detects, so this is informational.
+    #[arg(long, default_value = "auto")]
     language: String,
+
+    /// Maximum tokens the ASR decoder may emit per utterance.
+    #[arg(long, default_value_t = 256)]
+    max_new_tokens: usize,
 
     /// HTTP port for the overlay.
     #[arg(long, default_value_t = 8080)]
@@ -29,8 +29,8 @@ async fn main() {
     let cli = Cli::parse();
 
     let mut config = asr_overlay::config::load();
-    config.model_path = cli.model;
     config.language = cli.language;
+    config.max_new_tokens = cli.max_new_tokens;
     config.port = cli.port;
     config.auto_start = !cli.no_auto_start;
     asr_overlay::config::save(&config);
@@ -51,8 +51,8 @@ async fn main() {
 
     log::info!("ASR Overlay running at http://localhost:{port}");
     log::info!("Overlay (OBS Browser Source): http://localhost:{port}/");
-    log::info!("Model:  {}", config.model_path);
-    log::info!("Lang:   {}", config.language);
+    log::info!("ASR:    {}", asr_overlay::asr::ARK_ASR.repo);
+    log::info!("Cache:  {}", asr_overlay::hub::cache_root().display());
 
     if let Err(e) = asr_overlay::tray::create_tray(Arc::clone(&state), port) {
         log::warn!("Failed to create tray icon: {e}");

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::audio::{resample_mono, AudioChunk};
 use crate::config::AsrConfig;
-use crate::stt::WhisperStt;
+use crate::asr::ArkAsr;
 
 /// A subtitle line pushed to all overlay clients.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -116,7 +116,7 @@ pub fn to_stt_rate(speech: &[f32], mic_rate: u32) -> Result<Vec<f32>> {
 }
 
 /// Run the segmentation loop: drain `rx` chunks, transcribe closed utterances
-/// with `stt`, and report results through `emit`.
+/// with `asr`, and report results through `emit`.
 ///
 /// Exits when the audio channel closes or `stop_rx` fires.
 pub fn run_pipeline(
@@ -124,7 +124,7 @@ pub fn run_pipeline(
     stop_rx: Receiver<()>,
     mic_rate: u32,
     config: AsrConfig,
-    mut stt: WhisperStt,
+    mut asr: ArkAsr,
     mut emit: impl FnMut(Caption) + Send + 'static,
 ) -> Result<()> {
     let mut pipeline = CaptionPipeline::new(mic_rate, config);
@@ -143,7 +143,7 @@ pub fn run_pipeline(
             let audio_16k = to_stt_rate(&speech, mic_rate)?;
             log::info!("Utterance: {} ms", speech.len() * 1000 / mic_rate.max(1) as usize);
 
-            match stt.transcribe(&audio_16k) {
+            match asr.transcribe(&audio_16k) {
                 Ok(text) if !text.is_empty() => {
                     log::info!("Captured: {text}");
                     emit(Caption {
@@ -153,7 +153,7 @@ pub fn run_pipeline(
                     });
                 }
                 Ok(_) => log::debug!("Empty transcription"),
-                Err(e) => log::error!("STT error: {e}"),
+                Err(e) => log::error!("ASR error: {e}"),
             }
         }
     }

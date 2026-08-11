@@ -6,10 +6,13 @@ use std::path::PathBuf;
 pub struct AsrConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Hint only — ARK-ASR detects the spoken language itself. Kept for the
+    /// overlay UI and for future TTS voice selection.
     #[serde(default = "default_language")]
     pub language: String,
-    #[serde(default = "default_model_path")]
-    pub model_path: String,
+    /// Maximum tokens the ASR decoder may emit per utterance.
+    #[serde(default = "default_max_new_tokens")]
+    pub max_new_tokens: usize,
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
     /// RMS energy threshold above which the pipeline treats a chunk as speech.
@@ -34,7 +37,7 @@ impl Default for AsrConfig {
         Self {
             port: default_port(),
             language: default_language(),
-            model_path: default_model_path(),
+            max_new_tokens: default_max_new_tokens(),
             auto_start: default_auto_start(),
             vad_threshold: default_vad_threshold(),
             vad_silence_ms: default_vad_silence_ms(),
@@ -50,11 +53,11 @@ fn default_port() -> u16 {
 }
 
 fn default_language() -> String {
-    "es".to_string()
+    "auto".to_string()
 }
 
-fn default_model_path() -> String {
-    "models/whisper/ggml-small.bin".to_string()
+fn default_max_new_tokens() -> usize {
+    256
 }
 
 fn default_auto_start() -> bool {
@@ -123,8 +126,8 @@ mod tests {
     fn test_default_config() {
         let config = AsrConfig::default();
         assert_eq!(config.port, 8080);
-        assert_eq!(config.language, "es");
-        assert_eq!(config.model_path, "models/whisper/ggml-small.bin");
+        assert_eq!(config.language, "auto");
+        assert_eq!(config.max_new_tokens, 256);
         assert!(config.auto_start);
         assert_eq!(config.vad_threshold, 0.005);
         assert_eq!(config.vad_silence_ms, 600);
@@ -138,7 +141,7 @@ mod tests {
         let config = AsrConfig {
             port: 9090,
             language: "en".to_string(),
-            model_path: "models/whisper/ggml-base.bin".to_string(),
+            max_new_tokens: 128,
             auto_start: false,
             vad_threshold: 0.01,
             vad_silence_ms: 800,
@@ -157,7 +160,7 @@ mod tests {
         let json = r#"{"port": 9090}"#;
         let config: AsrConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.port, 9090);
-        assert_eq!(config.language, "es");
+        assert_eq!(config.language, "auto");
         assert_eq!(config.threads, 5);
     }
 

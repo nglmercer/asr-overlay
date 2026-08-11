@@ -21,10 +21,20 @@ bytes = "1"
 cpal = "0.18"
 # resampling
 rubato = "0.14"
-# STT
-whisper-rs = "0.16"
 # audio callbacks → worker threads
 crossbeam-channel = "0.5"
+
+# ONNX Runtime — powers both ASR (ARK-ASR INT8) and TTS (Audio8 INT4)
+ort = { version = "2.0.0-rc.13", default-features = false, features = [
+    "download-binaries",
+    "tls-rustls",
+] }
+# HF tokenizer.json
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+# log-mel frontend (Whisper feature extractor)
+rustfft = "6"
+# model auto-download
+ureq = "3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

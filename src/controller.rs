@@ -6,7 +6,6 @@ use std::thread::JoinHandle;
 use crate::audio::open_microphone;
 use crate::caption::run_pipeline;
 use crate::server::AppState;
-use crate::stt::WhisperStt;
 
 /// Global, singly-created pipeline controller. The server and tray both use it
 /// to start/stop listening without racing on the microphone.
@@ -54,14 +53,10 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             // Keep the mic (and its stream) alive across run_pipeline.
             let mic = mic;
 
-            let stt = match WhisperStt::load(&config.model_path, &config.language, config.threads)
-            {
+            let asr = match crate::asr::load(config.threads, config.max_new_tokens) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::error!("Failed to load Whisper model: {e}");
-                    log::error!(
-                        "Download a model, e.g. ggml-small.bin, and point --model / config at it."
-                    );
+                    log::error!("Failed to load the ASR model: {e}");
                     return;
                 }
             };
@@ -71,7 +66,7 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
                 let _ = caption_tx.send(caption);
             };
 
-            if let Err(e) = run_pipeline(mic.rx, stop_rx, mic_rate, config, stt, emit) {
+            if let Err(e) = run_pipeline(mic.rx, stop_rx, mic_rate, config, asr, emit) {
                 log::error!("Pipeline stopped with error: {e}");
             }
             // Dropping `mic` closes the cpal stream, releasing the device.
