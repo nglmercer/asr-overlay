@@ -7,5 +7,5 @@ pub mod sampler;
 pub mod slow_ar;
 pub mod voice;
 
-pub use manifest::Manifest;
+pub use manifest::{Manifest, SlowToken};
 pub use sampler::{sample, SamplingParams};

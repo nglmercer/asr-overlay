@@ -39,16 +39,7 @@ mod tests {
 
     #[test]
     fn rows_is_codebooks_plus_one() {
-        let json = r#"{
-            "max_seq_len": 2048, "num_layers": 24, "num_fast_layers": 4,
-            "num_codebooks": 10, "n_local_heads": 2, "fast_n_local_heads": 2,
-            "head_dim": 64, "fast_head_dim": 64, "codebook_size": 4096,
-            "semantic_begin_id": 151678, "semantic_end_id": 155773,
-            "im_end_id": 151645, "codec_sample_rate": 44100,
-            "codec_hop_length": 2048, "stream_context_frames": 128,
-            "stream_guard_frames": 1
-        }"#;
-        let m = Manifest::from_json(json).unwrap();
+        let m = Manifest::from_json(crate::tts::manifest::SAMPLE_MANIFEST).unwrap();
         assert_eq!(prompt_rows(&m), 11);
     }
 }
