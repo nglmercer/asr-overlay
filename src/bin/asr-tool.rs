@@ -1,37 +1,134 @@
-//! Developer tool: inspect the ONNX graph signatures and transcribe a WAV.
+//! Developer tool: inspect the ONNX graph signatures, transcribe a WAV, and
+//! compare the CPU cost of the ASR backends on the same audio.
 //!
-//!     cargo run --bin asr-tool -- inspect
+//!     cargo run --bin asr-tool -- inspect [ark|nemotron]
 //!     cargo run --bin asr-tool -- transcribe audio.wav
+//!     cargo run --release --bin asr-tool -- bench audio.wav --threads 1,6,12
 
 use anyhow::{anyhow, Result};
+use asr_overlay::asr::{Backend, SpeechModel};
 use ort::session::Session;
+
+/// Flags shared by every subcommand, pulled out of the argument list before
+/// the positional arguments are read.
+#[derive(Debug, Clone)]
+struct Options {
+    backend: Backend,
+    /// Thread counts to run; `bench` sweeps them, everything else uses the
+    /// first.
+    threads: Vec<usize>,
+    language: Option<String>,
+    backends: Vec<Backend>,
+    repeat: usize,
+}
 
 fn main() -> Result<()> {
     asr_overlay::logger::init();
-    let mut args = std::env::args().skip(1);
+    let (options, mut args) = parse_options(std::env::args().skip(1).collect())?;
+    let mut args = args.drain(..);
+
     match args.next().as_deref() {
-        Some("inspect") => inspect(),
+        Some("inspect") => inspect(options.backend),
         Some("transcribe") => {
-            let path = args.next().ok_or_else(|| anyhow!("usage: transcribe <file.wav>"))?;
-            transcribe(&path, args.next())
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow!("usage: transcribe <file.wav>"))?;
+            transcribe(&path, args.next(), &options)
+        }
+        Some("bench") => {
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow!("usage: bench <file.wav>"))?;
+            bench(&path, &options)
         }
         Some("micpath") => {
-            let path = args.next().ok_or_else(|| anyhow!("usage: micpath <file.wav>"))?;
-            micpath(&path)
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow!("usage: micpath <file.wav>"))?;
+            micpath(&path, &options)
         }
         Some("vad") => {
-            let path = args.next().ok_or_else(|| anyhow!("usage: vad <file.wav> [gain] [instruction]"))?;
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow!("usage: vad <file.wav> [gain] [instruction]"))?;
             let gain = args.next().and_then(|g| g.parse().ok()).unwrap_or(1.0);
-            vad(&path, gain, args.next())
+            vad(&path, gain, args.next(), &options)
         }
         _ => Err(anyhow!(
-            "usage: asr-tool [inspect | transcribe <file.wav> [instruction] \
-             | micpath <file.wav> | vad <file.wav> [gain] [instruction]]"
+            "usage: asr-tool [--backend ark|nemotron] [--threads N[,N...]] \
+             [--language es-US] [--repeat N]\n  \
+             inspect [ark|nemotron]\n  \
+             transcribe <file.wav> [instruction]\n  \
+             bench <file.wav>            compare backends on the same audio\n  \
+             micpath <file.wav>\n  \
+             vad <file.wav> [gain] [instruction]"
         )),
     }
 }
 
-fn inspect() -> Result<()> {
+/// Split `--flag value` pairs out of the arguments, leaving the positionals.
+///
+/// Deliberately tiny: the tool is a developer harness, and a full `clap`
+/// derive here would be more code than the commands it dispatches to.
+fn parse_options(args: Vec<String>) -> Result<(Options, Vec<String>)> {
+    let config = asr_overlay::config::load();
+    let mut options = Options {
+        backend: std::env::var("ASR_BACKEND")
+            .map(|name| Backend::parse(&name))
+            .unwrap_or_else(|_| Backend::parse(&config.asr_backend)),
+        threads: vec![std::env::var("ASR_THREADS")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(config.threads)],
+        language: None,
+        backends: Backend::all().to_vec(),
+        repeat: 1,
+    };
+
+    let mut positional = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let mut value = || {
+            iter.next()
+                .ok_or_else(|| anyhow!("missing value for a flag"))
+        };
+        match arg.as_str() {
+            "--backend" | "-b" => options.backend = Backend::parse(&value()?),
+            "--backends" => {
+                options.backends = value()?.split(',').map(Backend::parse).collect();
+            }
+            "--threads" | "-t" => {
+                options.threads = value()?
+                    .split(',')
+                    .map(|t| t.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            "--language" | "-l" => options.language = Some(value()?),
+            "--repeat" => options.repeat = value()?.parse()?,
+            other => positional.push(other.to_string()),
+        }
+    }
+    if options.threads.is_empty() {
+        options.threads.push(config.threads);
+    }
+    Ok((options, positional))
+}
+
+/// Load a backend and apply the options that every command shares.
+fn load_model(backend: Backend, threads: usize, options: &Options) -> Result<Box<dyn SpeechModel>> {
+    let config = asr_overlay::config::load();
+    let mut model = asr_overlay::asr::load(backend, threads, config.max_new_tokens)?;
+    model.set_min_audio_ms(config.min_audio_ms);
+    let language = options.language.clone().unwrap_or(config.language);
+    model.set_language(&language)?;
+    Ok(model)
+}
+
+fn inspect(backend: Backend) -> Result<()> {
+    if backend == Backend::Nemotron {
+        let dir = asr_overlay::asr::ensure_backend(backend)?;
+        return asr_overlay::asr::NemotronAsr::load(&dir, 1).map(|model| model.describe());
+    }
     let dir = asr_overlay::hub::repo_dir(&asr_overlay::asr::ARK_ASR);
     for file in [
         "audio_encoder_whisper_int8.onnx",
@@ -62,13 +159,10 @@ fn inspect() -> Result<()> {
     Ok(())
 }
 
-fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
+fn transcribe(path: &str, instruction: Option<String>, options: &Options) -> Result<()> {
     let samples = read_wav_16k_mono(path)?;
-    let threads: usize = std::env::var("ASR_THREADS")
-        .ok()
-        .and_then(|t| t.parse().ok())
-        .unwrap_or(5);
-    println!("Threads: {threads}");
+    let threads = options.threads[0];
+    println!("Backend: {}, threads: {threads}", options.backend.as_str());
     println!(
         "Loaded {} samples ({:.2}s)",
         samples.len(),
@@ -76,7 +170,7 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
     );
 
     let started = std::time::Instant::now();
-    let mut asr = asr_overlay::asr::load(threads, 256)?;
+    let mut asr = load_model(options.backend, threads, options)?;
     if let Some(instruction) = &instruction {
         println!("Instruction: {instruction}");
         asr.set_instruction(instruction);
@@ -85,7 +179,7 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
 
     let started = std::time::Instant::now();
     let mut first_word = None;
-    let text = asr.transcribe_streaming(&samples, |partial| {
+    let text = asr.transcribe_streaming(&samples, &mut |partial: &str| {
         if first_word.is_none() && !partial.is_empty() {
             first_word = Some(started.elapsed().as_secs_f32());
         }
@@ -103,6 +197,121 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// One measured transcription.
+struct Run {
+    backend: Backend,
+    threads: usize,
+    load_secs: f32,
+    elapsed_secs: f32,
+    first_partial_secs: Option<f32>,
+    text: String,
+}
+
+/// Run every backend over the same file at every requested thread count and
+/// print what each one costs on this CPU.
+///
+/// The number that matters for a live overlay is the real-time factor: below
+/// 1.0 the model keeps up with the microphone, above it the captions fall
+/// further behind the longer someone talks.
+fn bench(path: &str, options: &Options) -> Result<()> {
+    let samples = read_wav_16k_mono(path)?;
+    let audio_secs = samples.len() as f32 / 16_000.0;
+    println!(
+        "Benchmarking {path}: {audio_secs:.2}s of audio, {} thread setting(s), {} run(s) each",
+        options.threads.len(),
+        options.repeat
+    );
+    println!("CPU: {} logical cores\n", num_cores());
+
+    let mut runs: Vec<Run> = Vec::new();
+    for &backend in &options.backends {
+        for &threads in &options.threads {
+            let started = std::time::Instant::now();
+            let mut asr = match load_model(backend, threads, options) {
+                Ok(asr) => asr,
+                Err(e) => {
+                    println!("{} failed to load: {e}", backend.as_str());
+                    continue;
+                }
+            };
+            let load_secs = started.elapsed().as_secs_f32();
+
+            for run in 0..options.repeat.max(1) {
+                let started = std::time::Instant::now();
+                let mut first_partial = None;
+                let text = asr.transcribe_streaming(&samples, &mut |partial: &str| {
+                    if first_partial.is_none() && !partial.is_empty() {
+                        first_partial = Some(started.elapsed().as_secs_f32());
+                    }
+                });
+                let elapsed = started.elapsed().as_secs_f32();
+                match text {
+                    Ok(text) => {
+                        println!(
+                            "  {:<9} threads {:<3} run {}/{}: {elapsed:.2}s  RTF {:.2}",
+                            backend.as_str(),
+                            threads,
+                            run + 1,
+                            options.repeat.max(1),
+                            elapsed / audio_secs.max(f32::EPSILON)
+                        );
+                        runs.push(Run {
+                            backend,
+                            threads,
+                            load_secs,
+                            elapsed_secs: elapsed,
+                            first_partial_secs: first_partial,
+                            text,
+                        });
+                    }
+                    Err(e) => println!("  {} threads {threads}: error: {e}", backend.as_str()),
+                }
+            }
+        }
+    }
+
+    if runs.is_empty() {
+        return Err(anyhow!("No backend produced a transcript"));
+    }
+
+    println!("\n{:<10} {:>7} {:>9} {:>7} {:>9} {:>9}", "backend", "threads", "load s", "run s", "RTF", "1st word");
+    println!("{}", "-".repeat(56));
+    for run in &runs {
+        println!(
+            "{:<10} {:>7} {:>9.1} {:>7.2} {:>9.2} {:>9}",
+            run.backend.as_str(),
+            run.threads,
+            run.load_secs,
+            run.elapsed_secs,
+            run.elapsed_secs / audio_secs.max(f32::EPSILON),
+            run.first_partial_secs
+                .map(|s| format!("{s:.2}s"))
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+
+    println!("\nTranscripts");
+    let mut seen: Vec<(Backend, usize)> = Vec::new();
+    for run in &runs {
+        if seen.contains(&(run.backend, run.threads)) {
+            continue;
+        }
+        seen.push((run.backend, run.threads));
+        println!("  [{} @ {}] {}", run.backend.as_str(), run.threads, run.text);
+    }
+    println!(
+        "\nRTF is model time / audio time: below 1.00 the backend keeps up with \
+         the microphone."
+    );
+    Ok(())
+}
+
+fn num_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0)
+}
+
 /// Push a WAV through the live capture path — upsampled to a 48 kHz mic, split
 /// into callback-sized chunks, segmented by the real VAD — and transcribe each
 /// utterance the way the overlay would.
@@ -110,7 +319,7 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
 /// `gain` scales the input: a headset at 0.15 of full scale is a very different
 /// test from a studio recording, and segmentation is where that shows up. If
 /// `transcribe` is right and this is wrong, the segmentation is to blame.
-fn vad(path: &str, gain: f32, instruction: Option<String>) -> Result<()> {
+fn vad(path: &str, gain: f32, instruction: Option<String>, options: &Options) -> Result<()> {
     let samples: Vec<f32> = read_wav_16k_mono(path)?.iter().map(|s| s * gain).collect();
     let mic = asr_overlay::audio::resample_mono(&samples, 16_000, 48_000)?;
 
@@ -136,7 +345,7 @@ fn vad(path: &str, gain: f32, instruction: Option<String>) -> Result<()> {
         utterances.push(speech);
     }
 
-    let mut asr = asr_overlay::asr::load(5, 256)?;
+    let mut asr = load_model(options.backend, options.threads[0], options)?;
     asr.set_min_audio_ms(min_audio_ms);
     if let Some(instruction) = &instruction {
         println!("Instruction: {instruction}");
@@ -218,7 +427,7 @@ fn read_wav_16k_mono(path: &str) -> Result<Vec<f32>> {
 /// Push a 16 kHz file through the exact conversion the microphone path uses
 /// (upsample to the mic's 48 kHz, then back down) and transcribe the result.
 /// If this differs from `transcribe`, the resampler is to blame, not the model.
-fn micpath(path: &str) -> Result<()> {
+fn micpath(path: &str, options: &Options) -> Result<()> {
     let original = read_wav_16k_mono(path)?;
     let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt();
     let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -257,7 +466,7 @@ fn micpath(path: &str) -> Result<()> {
     let mel_diff = fa.iter().zip(&fb).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     println!("mel frames {frames_a} vs {frames_b}, max mel diff {mel_diff:.5}");
 
-    let mut asr = asr_overlay::asr::load(5, 256)?;
+    let mut asr = load_model(options.backend, options.threads[0], options)?;
     // Reverse order on purpose: if the *first* call always wins, the problem is
     // leftover state between calls, not the audio.
     println!("\nmic path: {:?}", asr.transcribe(&back)?);

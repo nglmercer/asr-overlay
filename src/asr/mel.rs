@@ -42,15 +42,31 @@ fn mel_to_hz(mel: f64) -> f64 {
 /// Returns `[num_freq_bins][N_MELS]`, matching
 /// `mel_filter_bank(201, 128, 0.0, 8000.0, 16000, norm="slaney", mel_scale="slaney")`.
 pub fn mel_filters() -> Vec<Vec<f32>> {
-    let num_freq_bins = N_FFT / 2 + 1; // 201
-    let nyquist = SAMPLE_RATE as f64 / 2.0;
+    slaney_filters(N_FFT, N_MELS, SAMPLE_RATE, 0.0, SAMPLE_RATE as f64 / 2.0)
+}
 
-    let mel_min = hz_to_mel(0.0);
-    let mel_max = hz_to_mel(nyquist);
-    // N_MELS + 2 evenly spaced points on the mel axis.
-    let filter_freqs: Vec<f64> = (0..N_MELS + 2)
+/// Triangular mel filterbank with Slaney area normalization, for an arbitrary
+/// FFT size and band count. Returns `[n_fft / 2 + 1][n_mels]`.
+///
+/// Both frontends need this: HuggingFace's `mel_filter_bank(..., norm="slaney",
+/// mel_scale="slaney")` and `librosa.filters.mel(..., norm="slaney",
+/// htk=False)` — which NeMo uses — compute the same thing.
+pub fn slaney_filters(
+    n_fft: usize,
+    n_mels: usize,
+    sample_rate: u32,
+    fmin: f64,
+    fmax: f64,
+) -> Vec<Vec<f32>> {
+    let num_freq_bins = n_fft / 2 + 1;
+    let nyquist = sample_rate as f64 / 2.0;
+
+    let mel_min = hz_to_mel(fmin);
+    let mel_max = hz_to_mel(fmax);
+    // n_mels + 2 evenly spaced points on the mel axis.
+    let filter_freqs: Vec<f64> = (0..n_mels + 2)
         .map(|i| {
-            let mel = mel_min + (mel_max - mel_min) * i as f64 / (N_MELS + 1) as f64;
+            let mel = mel_min + (mel_max - mel_min) * i as f64 / (n_mels + 1) as f64;
             mel_to_hz(mel)
         })
         .collect();
@@ -61,9 +77,9 @@ pub fn mel_filters() -> Vec<Vec<f32>> {
 
     let filter_diff: Vec<f64> = filter_freqs.windows(2).map(|w| w[1] - w[0]).collect();
 
-    let mut bank = vec![vec![0.0f32; N_MELS]; num_freq_bins];
+    let mut bank = vec![vec![0.0f32; n_mels]; num_freq_bins];
     for (bin, &fft_freq) in fft_freqs.iter().enumerate() {
-        for mel in 0..N_MELS {
+        for mel in 0..n_mels {
             // slopes[j] = filter_freqs[j] - fft_freq
             let down = -(filter_freqs[mel] - fft_freq) / filter_diff[mel];
             let up = (filter_freqs[mel + 2] - fft_freq) / filter_diff[mel + 1];
@@ -189,8 +205,9 @@ impl MelExtractor {
     }
 }
 
-/// Symmetric reflect padding (`np.pad(mode="reflect")`).
-fn reflect_pad(samples: &[f32], pad: usize) -> Vec<f32> {
+/// Symmetric reflect padding (`np.pad(mode="reflect")`), which is also what
+/// `torch.stft(center=True)` applies.
+pub fn reflect_pad(samples: &[f32], pad: usize) -> Vec<f32> {
     if samples.is_empty() {
         return vec![0.0; pad * 2];
     }

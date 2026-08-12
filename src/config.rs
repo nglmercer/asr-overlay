@@ -61,8 +61,13 @@ use std::path::PathBuf;
 pub struct AsrConfig {
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Hint only — ARK-ASR detects the spoken language itself. Kept for the
-    /// overlay UI and for future TTS voice selection.
+    /// Which ASR model runs: `ark` (audio LLM, whole utterances) or
+    /// `nemotron` (cache-aware streaming RNNT). See `asr-tool bench`.
+    #[serde(default = "default_asr_backend")]
+    pub asr_backend: String,
+    /// Spoken language. ARK-ASR detects it itself and ignores this; Nemotron
+    /// conditions its encoder on it, and takes either `auto` or a locale tag
+    /// such as `es-US`, `en-US` or `pt-BR`.
     #[serde(default = "default_language")]
     pub language: String,
     /// Maximum tokens the ASR decoder may emit per utterance.
@@ -103,6 +108,7 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
+            asr_backend: default_asr_backend(),
             language: default_language(),
             max_new_tokens: default_max_new_tokens(),
             auto_start: default_auto_start(),
@@ -124,6 +130,12 @@ fn default_min_audio_ms() -> u64 {
 
 fn default_port() -> u16 {
     8080
+}
+
+/// ARK-ASR stays the default: it is the backend the VAD, the padding and the
+/// prompt defaults were all tuned around.
+fn default_asr_backend() -> String {
+    "ark".to_string()
 }
 
 fn default_language() -> String {
@@ -208,6 +220,7 @@ mod tests {
     fn test_default_config() {
         let config = AsrConfig::default();
         assert_eq!(config.port, 8080);
+        assert_eq!(config.asr_backend, "ark");
         assert_eq!(config.language, "auto");
         assert_eq!(config.max_new_tokens, 256);
         assert!(config.auto_start);
@@ -222,6 +235,7 @@ mod tests {
     fn test_config_serialize_deserialize() {
         let config = AsrConfig {
             port: 9090,
+            asr_backend: "nemotron".to_string(),
             language: "en".to_string(),
             max_new_tokens: 128,
             auto_start: false,
@@ -245,6 +259,7 @@ mod tests {
         let json = r#"{"port": 9090}"#;
         let config: AsrConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.port, 9090);
+        assert_eq!(config.asr_backend, "ark");
         assert_eq!(config.language, "auto");
         assert_eq!(config.threads, default_threads());
         assert_eq!(config.min_audio_ms, 8_000);

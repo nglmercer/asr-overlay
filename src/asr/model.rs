@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use super::mel::MelExtractor;
+use super::{Backend, SpeechModel};
 
 /// `runtime_manifest.json` from the ARK-ASR repo.
 #[derive(Debug, Clone, Deserialize)]
@@ -385,22 +386,13 @@ impl ArkAsr {
         best as i64
     }
 
-    /// Transcribe mono `f32` audio at 16 kHz.
-    pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
-        self.transcribe_streaming(samples, |_| {})
-    }
-
     /// Transcribe, reporting the text so far after every token.
     ///
     /// Decoding is ~90 ms per token, so a one-line caption spends a couple of
     /// seconds invisible if it is only shown when finished. Streaming the
     /// partial text puts words on screen while the rest is still decoding —
     /// the wait is the same, but the overlay stops looking frozen.
-    pub fn transcribe_streaming(
-        &mut self,
-        samples: &[f32],
-        mut on_partial: impl FnMut(&str),
-    ) -> Result<String> {
+    fn decode(&mut self, samples: &[f32], on_partial: &mut dyn FnMut(&str)) -> Result<String> {
         if samples.is_empty() {
             return Ok(String::new());
         }
@@ -514,6 +506,30 @@ impl ArkAsr {
             .decode(&out_ids, true)
             .map_err(|e| anyhow!("Detokenization failed: {e}"))?;
         Ok(text.trim().to_string())
+    }
+}
+
+impl SpeechModel for ArkAsr {
+    fn backend(&self) -> Backend {
+        Backend::Ark
+    }
+
+    fn transcribe_streaming(
+        &mut self,
+        samples: &[f32],
+        on_partial: &mut dyn FnMut(&str),
+    ) -> Result<String> {
+        self.decode(samples, on_partial)
+    }
+
+    // Inherent methods win over trait methods in resolution, so these forward
+    // to the `impl ArkAsr` versions above rather than calling themselves.
+    fn set_min_audio_ms(&mut self, ms: u64) {
+        ArkAsr::set_min_audio_ms(self, ms);
+    }
+
+    fn set_instruction(&mut self, instruction: &str) {
+        ArkAsr::set_instruction(self, instruction);
     }
 }
 

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::audio::{resample_mono, AudioChunk};
 use crate::config::AsrConfig;
-use crate::asr::ArkAsr;
+use crate::asr::SpeechModel;
 
 /// A subtitle line pushed to all overlay clients.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -184,7 +184,7 @@ pub fn run_pipeline(
     stop_rx: Receiver<()>,
     mic_rate: u32,
     config: AsrConfig,
-    mut asr: ArkAsr,
+    mut asr: Box<dyn SpeechModel>,
     mut emit: impl FnMut(Caption) + Send + 'static,
 ) -> Result<()> {
     let mut pipeline = CaptionPipeline::new(mic_rate, config);
@@ -223,7 +223,7 @@ pub fn run_pipeline(
 
             let started = timestamp_ms();
             let mut showed_partial = false;
-            let streamed = asr.transcribe_streaming(&audio_16k, |partial| {
+            let streamed = asr.transcribe_streaming(&audio_16k, &mut |partial: &str| {
                 if !partial.is_empty() {
                     showed_partial = true;
                     emit(Caption {

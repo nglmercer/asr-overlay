@@ -65,9 +65,13 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             // Keep the mic (and its stream) alive across run_pipeline.
             let mic = mic;
 
-            let asr = match crate::asr::load(config.threads, config.max_new_tokens) {
+            let backend = crate::asr::Backend::parse(&config.asr_backend);
+            let asr = match crate::asr::load(backend, config.threads, config.max_new_tokens) {
                 Ok(mut asr) => {
                     asr.set_min_audio_ms(config.min_audio_ms);
+                    if let Err(e) = asr.set_language(&config.language) {
+                        log::warn!("Ignoring the configured language: {e}");
+                    }
                     asr
                 }
                 Err(e) => {
