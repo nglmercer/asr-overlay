@@ -14,6 +14,8 @@ No cloud, no Python runtime, no GPU.
   from `AsrConfig`), with pre-roll, tail and a half-threshold hysteresis to keep
   speech continuous. Never strip the quiet parts out of an utterance: the model
   answers spliced audio with fluent nonsense, sometimes in the wrong language.
+- **Padding**: `transcribe` pads clips shorter than `min_audio_ms` (8 s) with
+  silence. Measured: below ~6 s the decoder answers in the wrong language.
 - **Mel**: `asr/mel.rs` — Whisper log-mel frontend (128 bins, n_fft 400,
   hop 160) on `rustfft`.
 - **ASR**: `asr/model.rs` — `Audio8/ark-asr-0.6b-int8-onnx` on `ort`. Four

@@ -82,6 +82,12 @@ pub struct AsrConfig {
     /// Maximum utterance length (in ms) — forces segmentation of long speech.
     #[serde(default = "default_vad_max_ms")]
     pub vad_max_ms: u64,
+    /// Shortest clip handed to the model (in ms); shorter utterances are padded
+    /// with silence. Below a few seconds the decoder leans on its own priors
+    /// instead of the audio and answers in the wrong language, so this is the
+    /// main accuracy/latency dial: higher is more accurate and slower.
+    #[serde(default = "default_min_audio_ms")]
+    pub min_audio_ms: u64,
     /// Input device name, or empty for the system default.
     #[serde(default)]
     pub input_device: String,
@@ -104,11 +110,16 @@ impl Default for AsrConfig {
             vad_silence_ms: default_vad_silence_ms(),
             vad_min_ms: default_vad_min_ms(),
             vad_max_ms: default_vad_max_ms(),
+            min_audio_ms: default_min_audio_ms(),
             input_device: String::new(),
             threads: default_threads(),
             style: OverlayStyle::default(),
         }
     }
+}
+
+fn default_min_audio_ms() -> u64 {
+    8_000
 }
 
 fn default_port() -> u16 {
@@ -210,6 +221,7 @@ mod tests {
             vad_silence_ms: 800,
             vad_min_ms: 500,
             vad_max_ms: 20_000,
+            min_audio_ms: 6_000,
             input_device: String::new(),
             threads: 4,
             style: OverlayStyle::default(),
@@ -227,6 +239,7 @@ mod tests {
         assert_eq!(config.port, 9090);
         assert_eq!(config.language, "auto");
         assert_eq!(config.threads, 5);
+        assert_eq!(config.min_audio_ms, 8_000);
     }
 
     #[test]

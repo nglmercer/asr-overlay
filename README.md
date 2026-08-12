@@ -65,6 +65,13 @@ encode 3.9 s · prefill 0.8 s (147 tok) · decode 2.4 s (27 tok, ~87 ms/tok)
 total 7.5 s for 11 s of audio — 1.4x realtime
 ```
 
+Short utterances are padded to `min_audio_ms` (8 s by default) before they
+reach the encoder, which sets the latency floor at roughly 3–4 s per caption.
+That padding is not optional: on a 2 s clip this model stops listening to the
+audio and falls back on its own priors — the Spanish "El alma del Japón" comes
+back as "El南国的日本", and the same clip padded to 8 s transcribes correctly.
+6 s still drifts, 12 s is no better than 8 s.
+
 The encoder dominates and its cost scales with clip length, so short VAD
 utterances (1–3 s) are far cheaper than this 11 s sample. Note that 1.4x
 realtime is **slower than whisper-small** on the same CPU — the accuracy and

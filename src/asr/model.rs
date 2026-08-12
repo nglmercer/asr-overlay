@@ -66,6 +66,10 @@ const BLOCK_TOKEN_ID_FROM: usize = 151670;
 /// The instruction used by the official runtime.
 pub const DEFAULT_INSTRUCTION: &str = "Please transcribe this audio.";
 
+/// Default for `min_samples`: 8 s at 16 kHz. Measured on this model — 6 s
+/// still drifts into the wrong language, 12 s is no better than 8 s.
+const DEFAULT_MIN_SAMPLES: usize = 8 * 16_000;
+
 /// Longest repeating unit the loop guard looks for.
 const LOOP_MAX_CYCLE: usize = 4;
 
@@ -109,6 +113,8 @@ pub struct ArkAsr {
     /// Instruction given to the decoder after the audio. ARK-ASR is an audio
     /// LLM, so this steers what it produces.
     instruction: String,
+    /// Shortest clip handed to the encoder; shorter ones are padded.
+    min_samples: usize,
 }
 
 fn open_session(path: &Path, threads: usize) -> Result<Session> {
@@ -186,6 +192,7 @@ impl ArkAsr {
             max_new_tokens,
             blocked,
             instruction: DEFAULT_INSTRUCTION.to_string(),
+            min_samples: DEFAULT_MIN_SAMPLES,
         })
     }
 
@@ -246,6 +253,12 @@ impl ArkAsr {
         let (shape, embeds) = adapted[0].try_extract_tensor::<f32>()?;
         let n_tokens = shape[1] as usize;
         Ok((embeds.to_vec(), n_tokens))
+    }
+
+    /// Set the shortest clip handed to the model, in milliseconds. Anything
+    /// shorter is padded with silence; zero disables the padding.
+    pub fn set_min_audio_ms(&mut self, ms: u64) {
+        self.min_samples = (ms as usize) * 16_000 / 1000;
     }
 
     /// Override the decoder instruction (empty resets to the default).
@@ -363,6 +376,25 @@ impl ArkAsr {
         if samples.is_empty() {
             return Ok(String::new());
         }
+
+        // Pad short utterances with silence. Below a few seconds the decoder
+        // stops leaning on the audio and starts leaning on its own priors: the
+        // same Spanish clip that transcribes correctly at 7 s comes back as
+        // Chinese at 2 s ("El alma del Japón" → "El南国的日本"). Whisper pads
+        // every clip to 30 s for the same reason; a shorter window is enough
+        // here, and the encoder cost scales with what we pad to.
+        let padded;
+        let samples = if samples.len() < self.min_samples {
+            padded = {
+                let mut buffer = Vec::with_capacity(self.min_samples);
+                buffer.extend_from_slice(samples);
+                buffer.resize(self.min_samples, 0.0);
+                buffer
+            };
+            &padded[..]
+        } else {
+            samples
+        };
 
         // Reset the KV cache between utterances.
         for cache in self.caches.iter_mut() {

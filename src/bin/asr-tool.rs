@@ -20,13 +20,13 @@ fn main() -> Result<()> {
             micpath(&path)
         }
         Some("vad") => {
-            let path = args.next().ok_or_else(|| anyhow!("usage: vad <file.wav> [gain]"))?;
+            let path = args.next().ok_or_else(|| anyhow!("usage: vad <file.wav> [gain] [instruction]"))?;
             let gain = args.next().and_then(|g| g.parse().ok()).unwrap_or(1.0);
-            vad(&path, gain)
+            vad(&path, gain, args.next())
         }
         _ => Err(anyhow!(
             "usage: asr-tool [inspect | transcribe <file.wav> [instruction] \
-             | micpath <file.wav> | vad <file.wav> [gain]]"
+             | micpath <file.wav> | vad <file.wav> [gain] [instruction]]"
         )),
     }
 }
@@ -97,7 +97,7 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
 /// `gain` scales the input: a headset at 0.15 of full scale is a very different
 /// test from a studio recording, and segmentation is where that shows up. If
 /// `transcribe` is right and this is wrong, the segmentation is to blame.
-fn vad(path: &str, gain: f32) -> Result<()> {
+fn vad(path: &str, gain: f32, instruction: Option<String>) -> Result<()> {
     let samples: Vec<f32> = read_wav_16k_mono(path)?.iter().map(|s| s * gain).collect();
     let mic = asr_overlay::audio::resample_mono(&samples, 16_000, 48_000)?;
 
@@ -110,6 +110,7 @@ fn vad(path: &str, gain: f32) -> Result<()> {
         config.vad_min_ms
     );
 
+    let min_audio_ms = config.min_audio_ms;
     let mut pipeline = asr_overlay::caption::CaptionPipeline::new(48_000, config);
     let mut utterances = Vec::new();
     // 10 ms chunks, the size a cpal callback typically delivers.
@@ -123,7 +124,12 @@ fn vad(path: &str, gain: f32) -> Result<()> {
     }
 
     let mut asr = asr_overlay::asr::load(5, 256)?;
-    println!("{} utterances", utterances.len());
+    asr.set_min_audio_ms(min_audio_ms);
+    if let Some(instruction) = &instruction {
+        println!("Instruction: {instruction}");
+        asr.set_instruction(instruction);
+    }
+    println!("{} utterances, padded to {min_audio_ms} ms", utterances.len());
     for (i, speech) in utterances.iter().enumerate() {
         let audio = asr_overlay::caption::to_stt_rate(speech, 48_000)?;
         let rms = (audio.iter().map(|v| v * v).sum::<f32>() / audio.len().max(1) as f32).sqrt();

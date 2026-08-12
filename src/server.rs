@@ -220,7 +220,8 @@ async fn set_config(
         // The capture thread copies its config when it starts, so these two
         // only take effect on a restart. Everything else is read live.
         let needs_restart = guard.input_device != config.input_device
-            || guard.threads != config.threads;
+            || guard.threads != config.threads
+            || guard.min_audio_ms != config.min_audio_ms;
         *guard = config;
         (guard.clone(), needs_restart)
     };

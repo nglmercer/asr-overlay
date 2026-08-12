@@ -25,7 +25,7 @@
     const ROOT_FIELDS = [
         ['language', 'text'], ['input_device', 'text'], ['threads', 'number'], ['max_new_tokens', 'number'],
         ['vad_threshold', 'float'], ['vad_silence_ms', 'number'],
-        ['vad_min_ms', 'number'], ['vad_max_ms', 'number'],
+        ['vad_min_ms', 'number'], ['vad_max_ms', 'number'], ['min_audio_ms', 'number'],
     ];
 
     let config = null;
@@ -113,6 +113,7 @@
         $('vad_silence_ms').value = cfg.vad_silence_ms;
         $('vad_min_ms').value = cfg.vad_min_ms;
         $('vad_max_ms').value = cfg.vad_max_ms;
+        $('min_audio_ms').value = cfg.min_audio_ms;
 
         $('font_family').value = s.font_family;
         $('font_size').value = s.font_size;
@@ -155,6 +156,7 @@
         vad_silence_ms: +$('vad_silence_ms').value,
         vad_min_ms: +$('vad_min_ms').value,
         vad_max_ms: +$('vad_max_ms').value,
+        min_audio_ms: +$('min_audio_ms').value,
         style: readStyle(),
     });
 

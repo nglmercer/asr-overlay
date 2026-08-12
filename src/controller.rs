@@ -66,7 +66,10 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             let mic = mic;
 
             let asr = match crate::asr::load(config.threads, config.max_new_tokens) {
-                Ok(s) => s,
+                Ok(mut asr) => {
+                    asr.set_min_audio_ms(config.min_audio_ms);
+                    asr
+                }
                 Err(e) => {
                     log::error!("Failed to load the ASR model: {e}");
                     return;

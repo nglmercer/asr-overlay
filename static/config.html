@@ -195,6 +195,18 @@
                         <input type="number" id="vad_max_ms" step="500" min="1000">
                     </div>
                 </div>
+                <div class="row">
+                    <div class="field">
+                        <label for="min_audio_ms">Pad short audio to (ms)</label>
+                        <input type="number" id="min_audio_ms" step="500" min="0">
+                    </div>
+                </div>
+                <p class="hint">
+                    Short clips make the model fall back on its own priors and
+                    answer in the wrong language, so anything shorter than this
+                    is padded with silence. Higher is more accurate and slower —
+                    8000 is the measured sweet spot, 6000 already drifts.
+                </p>
             </div>
 
             <div class="panel">
