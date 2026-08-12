@@ -51,6 +51,9 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
     let config = state.config.lock().clone();
     let caption_tx = state.caption_tx.clone();
     let last_caption = Arc::clone(&state.last_caption);
+    // The pipeline re-reads this before every utterance, so language edits
+    // made while listening apply without restarting the model.
+    let live_config = Arc::clone(&state.config);
 
     // The whole Microphone (stream + receiver) moves into the thread so the
     // cpal stream stays alive for as long as the pipeline runs.
@@ -69,9 +72,6 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             let asr = match crate::asr::load(backend, config.threads, config.max_new_tokens) {
                 Ok(mut asr) => {
                     asr.set_min_audio_ms(config.min_audio_ms);
-                    if let Err(e) = asr.set_language(&config.language) {
-                        log::warn!("Ignoring the configured language: {e}");
-                    }
                     asr
                 }
                 Err(e) => {
@@ -85,7 +85,7 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
                 let _ = caption_tx.send(caption);
             };
 
-            if let Err(e) = run_pipeline(mic.rx, stop_rx, mic_rate, config, asr, emit) {
+            if let Err(e) = run_pipeline(mic.rx, stop_rx, mic_rate, config, live_config, asr, emit) {
                 log::error!("Pipeline stopped with error: {e}");
             }
             // Dropping `mic` closes the cpal stream, releasing the device.

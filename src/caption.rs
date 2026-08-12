@@ -1,6 +1,8 @@
 use anyhow::Result;
 use crossbeam_channel::Receiver;
+use parking_lot::Mutex;
 use serde::Serialize;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::audio::{resample_mono, AudioChunk};
@@ -184,12 +186,20 @@ pub fn run_pipeline(
     stop_rx: Receiver<()>,
     mic_rate: u32,
     config: AsrConfig,
+    // Live settings shared with the HTTP server, re-read before every
+    // utterance so config-page edits apply without a restart. Language is a
+    // single scalar on the model, so applying it is far cheaper than
+    // reloading the graphs.
+    live_config: Arc<Mutex<AsrConfig>>,
     mut asr: Box<dyn SpeechModel>,
     mut emit: impl FnMut(Caption) + Send + 'static,
 ) -> Result<()> {
     let mut pipeline = CaptionPipeline::new(mic_rate, config);
     // Chunk size is fixed by the audio backend; remember it to size the backlog.
     let mut backlog_chunk_samples;
+    // Language already applied to `asr`; re-apply only when the config page
+    // changes it, so the model is never touched just because speech resumed.
+    let mut applied_language: Option<String> = None;
     log::info!("Pipeline running at {mic_rate} Hz");
 
     loop {
@@ -204,6 +214,19 @@ pub fn run_pipeline(
         backlog_chunk_samples = chunk.len();
 
         if let Some(speech) = pipeline.push_chunk(&chunk) {
+            // Apply the current configured language before decoding. This is
+            // what makes a language change in the config page take effect on
+            // the next utterance — no model reload required.
+            let language = live_config.lock().language.clone();
+            if applied_language.as_deref() != Some(language.as_str()) {
+                if let Err(e) = asr.set_language(&language) {
+                    log::warn!("Ignoring the configured language {language:?}: {e}");
+                } else {
+                    log::info!("Language set to {language:?}");
+                }
+                applied_language = Some(language);
+            }
+
             let audio_16k = to_stt_rate(&speech, mic_rate)?;
 
             // Report the level that actually reaches the model. Silence here

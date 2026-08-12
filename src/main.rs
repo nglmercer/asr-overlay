@@ -64,7 +64,7 @@ async fn main() {
         tokio::sync::broadcast::channel::<asr_overlay::config::OverlayStyle>(16);
 
     let state = Arc::new(asr_overlay::server::AppState {
-        config: parking_lot::Mutex::new(config.clone()),
+        config: std::sync::Arc::new(parking_lot::Mutex::new(config.clone())),
         caption_tx,
         last_caption: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         listening: parking_lot::Mutex::new(asr_overlay::server::ListeningState::Idle),

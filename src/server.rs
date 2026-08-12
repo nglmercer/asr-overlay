@@ -31,7 +31,7 @@ pub enum ListeningState {
 }
 
 pub struct AppState {
-    pub config: Mutex<AsrConfig>,
+    pub config: Arc<Mutex<AsrConfig>>,
     pub caption_tx: broadcast::Sender<Caption>,
     pub last_caption: Arc<Mutex<Option<Caption>>>,
     pub listening: Mutex<ListeningState>,
@@ -382,7 +382,7 @@ mod tests {
     fn test_state() -> Arc<AppState> {
         let (caption_tx, _rx) = broadcast::channel(16);
         Arc::new(AppState {
-            config: Mutex::new(AsrConfig::default()),
+            config: Arc::new(Mutex::new(AsrConfig::default())),
             caption_tx,
             last_caption: Arc::new(Mutex::new(None)),
             listening: Mutex::new(ListeningState::Idle),

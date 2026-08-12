@@ -23,7 +23,7 @@ impl TestServer {
         let (caption_tx, _rx) = tokio::sync::broadcast::channel(16);
 
         let state = Arc::new(AppState {
-            config: parking_lot::Mutex::new(AsrConfig::default()),
+            config: Arc::new(parking_lot::Mutex::new(AsrConfig::default())),
             caption_tx,
             last_caption: Arc::new(parking_lot::Mutex::new(None)),
             listening: parking_lot::Mutex::new(ListeningState::Idle),
