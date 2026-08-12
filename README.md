@@ -57,25 +57,35 @@ Lithuanian.
 
 ### Performance
 
-Measured on this machine with the 11 s `jfk.wav` sample, release build,
-5 threads:
+Measured on this machine (12 threads, release build) for a short utterance
+padded to 8 s:
 
 ```
-encode 3.9 s · prefill 0.8 s (147 tok) · decode 2.4 s (27 tok, ~87 ms/tok)
-total 7.5 s for 11 s of audio — 1.4x realtime
+encoder 1.7 s · prefill 0.45 s (110 tok) · decode 90 ms/token
+first word on screen 2.1 s after the utterance closes, full line at 3.3 s
 ```
+
+The ONNX audio encoder is ~85% of that; the Rust log-mel frontend is 1 ms and
+the adapter 7 ms, so there is nothing to win on our side of the graph. Three
+things move the number:
+
+- **Threads.** The encoder scales well: 12 threads instead of 5 cuts a short
+  utterance from ~3.9 s to ~2.9 s. `threads` defaults to every core, capped
+  at 12.
+- **`min_audio_ms`.** Encoder cost is linear in clip length, so each second of
+  padding costs ~0.25 s. 8 s is the shortest padding that keeps the model in
+  the right language (see below).
+- **Streaming.** Captions are pushed token by token as they decode, so the
+  first words appear about a second before the line is finished.
 
 Short utterances are padded to `min_audio_ms` (8 s by default) before they
-reach the encoder, which sets the latency floor at roughly 3–4 s per caption.
-That padding is not optional: on a 2 s clip this model stops listening to the
-audio and falls back on its own priors — the Spanish "El alma del Japón" comes
-back as "El南国的日本", and the same clip padded to 8 s transcribes correctly.
-6 s still drifts, 12 s is no better than 8 s.
-
-The encoder dominates and its cost scales with clip length, so short VAD
-utterances (1–3 s) are far cheaper than this 11 s sample. Note that 1.4x
-realtime is **slower than whisper-small** on the same CPU — the accuracy and
-the 19-language coverage are what you get for it.
+reach the encoder. That padding is not optional: on a 2 s clip this model stops
+listening to the audio and falls back on its own priors — the Spanish "El alma
+del Japón" comes back as "El南国的日本", and the same clip padded to 8 s
+transcribes correctly. 6 s still drifts, 12 s is no better than 8 s. The
+padding has to reach the decoder as `<|audio|>` tokens too: encoding 8 s but
+prompting with only the real speech tokens saves 270 ms of prefill and brings
+the wrong-language drift straight back.
 
 ## Captions are text, not an image
 

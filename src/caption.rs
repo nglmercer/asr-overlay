@@ -13,6 +13,11 @@ pub struct Caption {
     pub text: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    /// True while the utterance is still decoding. Consumers that only want
+    /// finished lines (a transcript log, say) can skip these; the overlay
+    /// shows them so words appear as they are recognized.
+    #[serde(default)]
+    pub partial: bool,
 }
 
 /// Audio kept from before the threshold is crossed, so an utterance starts on
@@ -216,16 +221,43 @@ pub fn run_pipeline(
                 log::warn!("Utterance is silent after resampling — check the input device");
             }
 
-            match asr.transcribe(&audio_16k) {
+            let started = timestamp_ms();
+            let mut showed_partial = false;
+            let streamed = asr.transcribe_streaming(&audio_16k, |partial| {
+                if !partial.is_empty() {
+                    showed_partial = true;
+                    emit(Caption {
+                        text: partial.to_string(),
+                        start_ms: started,
+                        end_ms: 0,
+                        partial: true,
+                    });
+                }
+            });
+
+            match streamed {
                 Ok(text) if !text.is_empty() => {
                     log::info!("Captured: {text}");
                     emit(Caption {
                         text,
-                        start_ms: timestamp_ms(),
-                        end_ms: 0,
+                        start_ms: started,
+                        end_ms: timestamp_ms(),
+                        partial: false,
                     });
                 }
-                Ok(_) => log::info!("No speech recognized in this utterance"),
+                Ok(_) => {
+                    log::info!("No speech recognized in this utterance");
+                    // Partial text is on screen; clear it rather than leaving
+                    // a line the model just decided against.
+                    if showed_partial {
+                        emit(Caption {
+                            text: String::new(),
+                            start_ms: started,
+                            end_ms: timestamp_ms(),
+                            partial: false,
+                        });
+                    }
+                }
                 Err(e) => log::error!("ASR error: {e}"),
             }
 

@@ -103,6 +103,17 @@ fn parse_sources(listing: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Every source name the sound server knows, monitors included.
+fn all_source_names() -> Vec<String> {
+    match pactl(&["list", "short", "sources"]) {
+        Some(listing) => listing
+            .lines()
+            .filter_map(|line| line.split('\t').nth(1).map(str::to_string))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// The sound server's default capture source, if any.
 fn default_server_source() -> Option<String> {
     let name = pactl(&["get-default-source"])?.trim().to_string();
@@ -292,9 +303,11 @@ fn open_source(host: &cpal::Host, node: &str) -> Result<Microphone> {
         .ok_or_else(|| anyhow!("PipeWire is not available on this host"))?;
 
     // PipeWire silently falls back to the default source for an unknown node,
-    // so say so rather than letting the wrong mic look like a bug.
-    let sources = server_sources();
-    if !sources.is_empty() && !sources.iter().any(|(name, _)| name == node) {
+    // so say so rather than letting the wrong mic look like a bug. Monitors are
+    // checked too: they are not offered in the picker, but a config can name
+    // one, and warning about a node that does exist would be misleading.
+    let sources = all_source_names();
+    if !sources.is_empty() && !sources.iter().any(|name| name == node) {
         log::warn!("Source {node:?} is not connected; PipeWire will use its default");
     }
 

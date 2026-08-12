@@ -84,9 +84,17 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
     println!("Model loaded in {:.1}s", started.elapsed().as_secs_f32());
 
     let started = std::time::Instant::now();
-    let text = asr.transcribe(&samples)?;
+    let mut first_word = None;
+    let text = asr.transcribe_streaming(&samples, |partial| {
+        if first_word.is_none() && !partial.is_empty() {
+            first_word = Some(started.elapsed().as_secs_f32());
+        }
+    })?;
     let elapsed = started.elapsed().as_secs_f32();
     println!("\nTranscript: {text}");
+    if let Some(first_word) = first_word {
+        println!("First word on screen after {first_word:.2}s");
+    }
     println!(
         "\nTook {elapsed:.2}s for {:.2}s of audio ({:.2}x realtime)",
         samples.len() as f32 / 16_000.0,
