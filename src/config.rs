@@ -61,8 +61,8 @@ use std::path::PathBuf;
 pub struct AsrConfig {
     #[serde(default = "default_port")]
     pub port: u16,
-    /// Which ASR model runs: `ark` (audio LLM, whole utterances) or
-    /// `nemotron` (cache-aware streaming RNNT). See `asr-tool bench`.
+    /// Which ASR model runs: `nemotron` (cache-aware streaming RNNT, the
+    /// default) or `ark` (audio LLM, whole utterances). See `asr-tool bench`.
     #[serde(default = "default_asr_backend")]
     pub asr_backend: String,
     /// Spoken language. ARK-ASR detects it itself and ignores this; Nemotron
@@ -132,10 +132,10 @@ fn default_port() -> u16 {
     8080
 }
 
-/// ARK-ASR stays the default: it is the backend the VAD, the padding and the
-/// prompt defaults were all tuned around.
+/// Nemotron is the default: the streaming encoder starts transcribing within
+/// a couple of chunks and never needs the padding the audio LLM relies on.
 fn default_asr_backend() -> String {
-    "ark".to_string()
+    "nemotron".to_string()
 }
 
 fn default_language() -> String {
@@ -220,7 +220,7 @@ mod tests {
     fn test_default_config() {
         let config = AsrConfig::default();
         assert_eq!(config.port, 8080);
-        assert_eq!(config.asr_backend, "ark");
+        assert_eq!(config.asr_backend, "nemotron");
         assert_eq!(config.language, "auto");
         assert_eq!(config.max_new_tokens, 256);
         assert!(config.auto_start);
@@ -259,7 +259,7 @@ mod tests {
         let json = r#"{"port": 9090}"#;
         let config: AsrConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.port, 9090);
-        assert_eq!(config.asr_backend, "ark");
+        assert_eq!(config.asr_backend, "nemotron");
         assert_eq!(config.language, "auto");
         assert_eq!(config.threads, default_threads());
         assert_eq!(config.min_audio_ms, 8_000);

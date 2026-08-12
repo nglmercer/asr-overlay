@@ -3,13 +3,14 @@
 //! Two models are wired up so their CPU cost can be compared on the same
 //! audio, the same machine and the same VAD:
 //!
+//! - [`Backend::Nemotron`] — `onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4`,
+//!   a cache-aware FastConformer-RNNT. Consumes 560 ms chunks and keeps its
+//!   encoder state between them, so there is no padding and no re-encoding.
+//!   This is the default backend.
 //! - [`Backend::Ark`] — `Audio8/ark-asr-0.6b-int8-onnx`, an audio LLM
 //!   (whisper encoder → adapter → Qwen2 decoder). Transcribes a whole
 //!   utterance at once and needs several seconds of audio to stay in the right
 //!   language.
-//! - [`Backend::Nemotron`] — `onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4`,
-//!   a cache-aware FastConformer-RNNT. Consumes 560 ms chunks and keeps its
-//!   encoder state between them, so there is no padding and no re-encoding.
 //!
 //! `asr-tool bench` runs both over the same file and prints the real-time
 //! factors.
@@ -76,9 +77,9 @@ pub const NEMOTRON_ASR: RepoSpec = RepoSpec {
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// Audio8 ARK-ASR 0.6B INT8 — the original backend.
-    #[default]
     Ark,
-    /// NVIDIA Nemotron 3.5 streaming 0.6B INT4.
+    /// NVIDIA Nemotron 3.5 streaming 0.6B INT4 — the default.
+    #[default]
     Nemotron,
 }
 
@@ -88,7 +89,8 @@ impl Backend {
     pub fn parse(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "nemotron" | "nemotron-3.5" | "nemo" => Backend::Nemotron,
-            _ => Backend::Ark,
+            "ark" | "ark-asr" | "audio8" => Backend::Ark,
+            _ => Backend::Nemotron,
         }
     }
 
@@ -238,7 +240,8 @@ mod tests {
             assert_eq!(Backend::parse(backend.as_str()), backend);
         }
         // Unknown names fall back rather than failing to start.
-        assert_eq!(Backend::parse("whisper"), Backend::Ark);
+        assert_eq!(Backend::parse("whisper"), Backend::Nemotron);
         assert_eq!(Backend::parse("NEMOTRON"), Backend::Nemotron);
+        assert_eq!(Backend::parse("ark"), Backend::Ark);
     }
 }

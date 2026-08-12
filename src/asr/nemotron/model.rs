@@ -75,21 +75,6 @@ impl Vocab {
         self.pieces.is_empty()
     }
 
-    /// Token id of a `<xx-YY>` language tag.
-    pub fn language_id(&self, locale: &str) -> Option<i64> {
-        let tag = format!("<{locale}>");
-        self.pieces.iter().position(|p| *p == tag).map(|i| i as i64)
-    }
-
-    /// Every locale the vocabulary has a tag for, without the angle brackets.
-    pub fn languages(&self) -> Vec<String> {
-        self.pieces
-            .iter()
-            .filter(|p| p.len() >= 5 && p.starts_with('<') && p.ends_with('>') && p.contains('-'))
-            .map(|p| p[1..p.len() - 1].to_string())
-            .collect()
-    }
-
     /// Metaspace decoding: pieces concatenate, and `▁` marks a word boundary.
     pub fn decode(&self, ids: &[i32]) -> String {
         let mut text = String::new();
@@ -136,7 +121,107 @@ pub struct NemotronAsr {
 
 /// `lang_id` for automatic language detection — the model's own default when
 /// no language tag conditions the encoder.
-pub const AUTO_LANGUAGE: i64 = 0;
+///
+/// The id is NOT a vocabulary position: the encoder's prompt-dictionary lookup
+/// expects the small canonical id from [`LANG_TO_ID`] (auto is 101).
+pub const AUTO_LANGUAGE: i64 = 101;
+
+/// Canonical `lang_id` values from the model's `prompt_dictionary` in
+/// `model_config.yaml` (mirrored by the onnxruntime-genai reference at
+/// `examples/python/nemotron_speech.py`). Values are small ints — the encoder
+/// builds a one-hot language prompt from them, so a vocabulary position like
+/// 2809 is out of range and produces garbage.
+const LANG_TO_ID: &[(&str, i64)] = &[
+    ("en", 0),
+    ("en-US", 0),
+    ("en-GB", 1),
+    ("es-ES", 2),
+    ("es", 3),
+    ("es-US", 3),
+    ("zh-CN", 4),
+    ("hi", 6),
+    ("hi-IN", 6),
+    ("ar", 7),
+    ("ar-AR", 7),
+    ("fr", 8),
+    ("fr-FR", 8),
+    ("de", 9),
+    ("de-DE", 9),
+    ("ja", 10),
+    ("ja-JP", 10),
+    ("ru", 11),
+    ("ru-RU", 11),
+    ("pt-BR", 12),
+    ("pt", 13),
+    ("pt-PT", 13),
+    ("ko", 14),
+    ("ko-KR", 14),
+    ("it", 15),
+    ("it-IT", 15),
+    ("nl", 16),
+    ("nl-NL", 16),
+    ("pl", 17),
+    ("pl-PL", 17),
+    ("tr", 18),
+    ("tr-TR", 18),
+    ("uk", 19),
+    ("uk-UA", 19),
+    ("ro", 20),
+    ("ro-RO", 20),
+    ("el", 21),
+    ("el-GR", 21),
+    ("cs", 22),
+    ("cs-CZ", 22),
+    ("hu", 23),
+    ("hu-HU", 23),
+    ("sv", 24),
+    ("sv-SE", 24),
+    ("da", 25),
+    ("da-DK", 25),
+    ("fi", 26),
+    ("fi-FI", 26),
+    ("sk", 28),
+    ("sk-SK", 28),
+    ("hr", 29),
+    ("hr-HR", 29),
+    ("bg", 30),
+    ("bg-BG", 30),
+    ("lt", 31),
+    ("lt-LT", 31),
+    ("th", 32),
+    ("th-TH", 32),
+    ("vi", 33),
+    ("vi-VN", 33),
+    ("et", 60),
+    ("et-EE", 60),
+    ("lv", 61),
+    ("lv-LV", 61),
+    ("sl", 62),
+    ("sl-SI", 62),
+    ("he", 64),
+    ("he-IL", 64),
+    ("fr-CA", 100),
+    ("mt", 102),
+    ("mt-MT", 102),
+    ("nb", 103),
+    ("nb-NO", 103),
+    ("nn", 104),
+    ("nn-NO", 104),
+];
+
+fn lang_to_id(language: &str) -> Option<i64> {
+    let language = language.trim();
+    LANG_TO_ID
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(language))
+        .map(|(_, id)| *id)
+        .or_else(|| {
+            LANG_TO_ID
+                .iter()
+                .find(|(key, _)| key.split('-').next().is_some_and(|code| code.eq_ignore_ascii_case(language)))
+                .map(|(_, id)| *id)
+        })
+}
 
 /// Encoder state carried between chunks. This is what "cache-aware" means:
 /// each 560 ms step sees the previous 56 encoder frames of attention context
@@ -209,20 +294,24 @@ impl NemotronAsr {
         })
     }
 
-    /// Locales this model can be pinned to, e.g. `es-US`.
+    /// Languages this model can be pinned to, e.g. `en`, `es-US`.
     pub fn languages(&self) -> Vec<String> {
-        self.vocab.languages()
+        LANG_TO_ID
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .collect()
     }
 
     /// Run the encoder over one 65-frame window and return its `[frames, 1024]`
     /// output plus how many of those frames are valid.
     ///
     /// `features` is `[65 * 128]` in `[frame][mel]` order — note that this
-    /// encoder wants time first, unlike the ARK one.
+    /// encoder wants time first, unlike the ARK one. The `length` input is
+    /// always the full window, matching the reference runtime which pads the
+    /// tail chunk with silence instead of shrinking it.
     fn encode_chunk(
         &mut self,
         features: Vec<f32>,
-        valid_frames: usize,
         cache: &mut EncoderCache,
     ) -> Result<(Vec<f32>, usize)> {
         let layers = self.config.encoder.num_hidden_layers;
@@ -233,7 +322,7 @@ impl NemotronAsr {
                 [1usize, ENCODER_FRAMES, self.config.num_mels],
                 features.into_boxed_slice(),
             ))?,
-            "length" => Tensor::from_array(([1usize], vec![valid_frames as i64].into_boxed_slice()))?,
+            "length" => Tensor::from_array(([1usize], vec![ENCODER_FRAMES as i64].into_boxed_slice()))?,
             "cache_last_channel" => TensorRef::from_array_view((
                 [1i64, layers as i64, self.config.left_context as i64, hidden as i64],
                 cache.last_channel.as_slice(),
@@ -379,7 +468,6 @@ impl SpeechModel for NemotronAsr {
             // at either end are zeros, matching how the reference runtime
             // primes and drains the stream.
             let mut window = vec![0.0f32; ENCODER_FRAMES * n_mels];
-            let mut valid = 0usize;
             for slot in 0..ENCODER_FRAMES {
                 let frame = (start + slot).checked_sub(context);
                 let Some(frame) = frame else { continue };
@@ -390,10 +478,9 @@ impl SpeechModel for NemotronAsr {
                 for mel in 0..n_mels {
                     window[slot * n_mels + mel] = features[mel * frames + frame];
                 }
-                valid = slot + 1;
             }
 
-            let (encoded, encoded_frames) = self.encode_chunk(window, valid, &mut cache)?;
+            let (encoded, encoded_frames) = self.encode_chunk(window, &mut cache)?;
             chunks += 1;
 
             let hidden = self.config.encoder.hidden_size;
@@ -428,8 +515,8 @@ impl SpeechModel for NemotronAsr {
         Ok(self.vocab.decode(&tokens))
     }
 
-    /// `auto`, or a locale the vocabulary has a tag for (`es-US`, `en-US`, …).
-    /// A bare language code picks that language's first locale.
+    /// `auto`, or a language the model can be pinned to (`en`, `es-US`, …).
+    /// A bare language code picks that language's canonical id.
     fn set_language(&mut self, language: &str) -> Result<()> {
         let language = language.trim();
         if language.is_empty() || language.eq_ignore_ascii_case("auto") {
@@ -437,30 +524,14 @@ impl SpeechModel for NemotronAsr {
             return Ok(());
         }
 
-        let locales = self.vocab.languages();
-        let matched = locales
-            .iter()
-            .find(|locale| locale.eq_ignore_ascii_case(language))
-            .or_else(|| {
-                locales
-                    .iter()
-                    .find(|locale| locale.split('-').next().is_some_and(|code| code.eq_ignore_ascii_case(language)))
-            })
-            .cloned();
-
-        match matched {
-            Some(locale) => {
-                self.lang_id = self
-                    .vocab
-                    .language_id(&locale)
-                    .ok_or_else(|| anyhow!("No tag for {locale}"))?;
-                log::info!("Nemotron pinned to {locale} (lang_id {})", self.lang_id);
-                Ok(())
-            }
-            None => Err(anyhow!(
-                "Nemotron does not support {language}; known locales: {}",
-                locales.join(", ")
-            )),
-        }
+        let lang_id = lang_to_id(language).ok_or_else(|| {
+            anyhow!(
+                "Nemotron does not support {language}; known languages: {}",
+                LANG_TO_ID.iter().map(|(key, _)| *key).collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        self.lang_id = lang_id;
+        log::info!("Nemotron pinned to {language} (lang_id {lang_id})");
+        Ok(())
     }
 }
