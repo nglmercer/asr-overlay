@@ -64,6 +64,11 @@ fn inspect() -> Result<()> {
 
 fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
     let samples = read_wav_16k_mono(path)?;
+    let threads: usize = std::env::var("ASR_THREADS")
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(5);
+    println!("Threads: {threads}");
     println!(
         "Loaded {} samples ({:.2}s)",
         samples.len(),
@@ -71,7 +76,7 @@ fn transcribe(path: &str, instruction: Option<String>) -> Result<()> {
     );
 
     let started = std::time::Instant::now();
-    let mut asr = asr_overlay::asr::load(5, 256)?;
+    let mut asr = asr_overlay::asr::load(threads, 256)?;
     if let Some(instruction) = &instruction {
         println!("Instruction: {instruction}");
         asr.set_instruction(instruction);

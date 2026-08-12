@@ -11,6 +11,7 @@
 //! (24 layers, hidden 896, 14 heads, 2 KV heads, head_dim 64, max 2048).
 
 use anyhow::{anyhow, Context, Result};
+use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::{Tensor, TensorRef};
 use serde::Deserialize;
@@ -120,6 +121,9 @@ pub struct ArkAsr {
 fn open_session(path: &Path, threads: usize) -> Result<Session> {
     let mut builder = Session::builder()
         .map_err(|e| anyhow!("Failed to create ONNX session builder: {e}"))?
+        // The reference runtime enables every graph optimization; so do we.
+        .with_optimization_level(GraphOptimizationLevel::All)
+        .map_err(|e| anyhow!("Failed to set the ONNX optimization level: {e}"))?
         .with_intra_threads(threads)
         .map_err(|e| anyhow!("Failed to set ONNX thread count: {e}"))?;
     builder
@@ -215,7 +219,9 @@ impl ArkAsr {
     /// Run the encoder + adapter, returning `[n_tokens, hidden]` audio
     /// embeddings ready to splice into the prompt.
     fn encode_audio(&mut self, samples: &[f32]) -> Result<(Vec<f32>, usize)> {
+        let mel_started = std::time::Instant::now();
         let (features, frames) = self.mel.features(samples);
+        let mel_ms = mel_started.elapsed().as_millis();
         if frames == 0 {
             return Ok((Vec::new(), 0));
         }
@@ -224,7 +230,9 @@ impl ArkAsr {
             [1usize, super::mel::N_MELS, frames],
             features.into_boxed_slice(),
         ))?;
+        let encoder_started = std::time::Instant::now();
         let encoded = self.encoder.run(ort::inputs!["audios" => mel_tensor])?;
+        let encoder_ms = encoder_started.elapsed().as_millis();
         let (shape, hidden) = encoded[0].try_extract_tensor::<f32>()?;
         let seq_len = shape[1] as usize;
         let feat_dim = shape[2] as usize;
@@ -247,9 +255,15 @@ impl ArkAsr {
             [1usize, merged_len, feat_dim * merge],
             merged.into_boxed_slice(),
         ))?;
+        let adapter_started = std::time::Instant::now();
         let adapted = self
             .adapter
             .run(ort::inputs!["merged_audio_features" => merged_tensor])?;
+        log::debug!(
+            "ASR encode: mel {mel_ms} ms ({frames} frames), encoder {encoder_ms} ms, \
+             adapter {} ms",
+            adapter_started.elapsed().as_millis()
+        );
         let (shape, embeds) = adapted[0].try_extract_tensor::<f32>()?;
         let n_tokens = shape[1] as usize;
         Ok((embeds.to_vec(), n_tokens))
@@ -373,6 +387,20 @@ impl ArkAsr {
 
     /// Transcribe mono `f32` audio at 16 kHz.
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
+        self.transcribe_streaming(samples, |_| {})
+    }
+
+    /// Transcribe, reporting the text so far after every token.
+    ///
+    /// Decoding is ~90 ms per token, so a one-line caption spends a couple of
+    /// seconds invisible if it is only shown when finished. Streaming the
+    /// partial text puts words on screen while the rest is still decoding —
+    /// the wait is the same, but the overlay stops looking frozen.
+    pub fn transcribe_streaming(
+        &mut self,
+        samples: &[f32],
+        mut on_partial: impl FnMut(&str),
+    ) -> Result<String> {
         if samples.is_empty() {
             return Ok(String::new());
         }
@@ -408,6 +436,10 @@ impl ArkAsr {
             return Ok(String::new());
         }
 
+        // Every audio token goes into the prompt, including the ones covering
+        // the silence padding. Trimming them to the real speech length saves
+        // ~270 ms of prefill and brings the wrong-language drift straight back:
+        // the padding has to reach the decoder, not just the encoder.
         let prompt = self.prompt(n_audio);
         let encoding = self
             .tokenizer
@@ -454,6 +486,9 @@ impl ArkAsr {
                 break;
             }
             out_ids.push(next as u32);
+            if let Ok(partial) = self.tokenizer.decode(&out_ids, true) {
+                on_partial(partial.trim());
+            }
             if let Some(cycle) = looping_cycle(&out_ids) {
                 log::debug!(
                     "ASR: stopped a {cycle}-token repetition loop after {} tokens",

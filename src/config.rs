@@ -154,8 +154,16 @@ fn default_vad_max_ms() -> u64 {
     30_000
 }
 
+/// Every core the machine has, capped at 12.
+///
+/// The ONNX encoder is the bulk of the latency and scales well with threads:
+/// on a 12-thread CPU, 12 threads transcribe a short utterance in ~2.9 s where
+/// 5 threads take ~3.9 s. Past ~12 the returns flatten and the overlay starves
+/// whatever else the machine is doing (OBS, a game, an encoder).
 fn default_threads() -> usize {
-    5
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(12))
+        .unwrap_or(5)
 }
 
 fn config_dir() -> PathBuf {
@@ -207,7 +215,7 @@ mod tests {
         assert_eq!(config.vad_silence_ms, 600);
         assert_eq!(config.vad_min_ms, 300);
         assert_eq!(config.vad_max_ms, 30_000);
-        assert_eq!(config.threads, 5);
+        assert_eq!(config.threads, default_threads());
     }
 
     #[test]
@@ -238,7 +246,7 @@ mod tests {
         let config: AsrConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.port, 9090);
         assert_eq!(config.language, "auto");
-        assert_eq!(config.threads, 5);
+        assert_eq!(config.threads, default_threads());
         assert_eq!(config.min_audio_ms, 8_000);
     }
 
