@@ -227,9 +227,23 @@ stored in `config.json`: set `api_key_env` to the variable holding the key
 4. Set width/height to match your stream layout
 5. Check "Shutdown source when not visible" for optimal performance
 
+## Frontend development
+
+The overlay and settings pages are a Vue 3 + TypeScript app in `frontend/`,
+built with Vite and embedded into the binary — `cargo build` runs the npm
+build automatically. For UI work, run the backend once (`cargo run`) and then,
+in `frontend/`:
+
+```bash
+npm install
+npm run dev      # dev server with hot reload, API proxied to :8080
+npm run typecheck
+```
+
 ## Requirements
 
 - Rust toolchain (1.70+)
+- Node.js v20.19+ or v22.12+ with npm (builds the frontend)
 - ~1.7 GiB of disk for the ASR model (downloaded on first run)
 - Linux audio deps: `libasound2-dev pkg-config`
 - GTK3 + libayatana-appindicator (tray) and cairo dev headers (PNG captions)

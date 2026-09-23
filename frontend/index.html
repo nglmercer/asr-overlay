@@ -27,11 +27,14 @@
     </style>
 </head>
 <body>
-    <!-- The caption is plain DOM text, not an image: style it with the config
-         page, or with your own CSS in an OBS Browser Source. -->
-    <div id="caption"><span class="caption-text"></span></div>
-    <div id="status">connecting…</div>
-    <script src="/style.js"></script>
-    <script src="/index.js"></script>
+    <!-- Static pre-render of the overlay: identical to what the Vue app
+         renders, so the first paint and non-JS fetches see the caption. -->
+    <div id="app">
+        <!-- The caption is plain DOM text, not an image: style it with the config
+             page, or with your own CSS in an OBS Browser Source. -->
+        <div id="caption"><span class="caption-text"></span></div>
+        <div id="status">connecting…</div>
+    </div>
+    <script type="module" src="/src/overlay/main.ts"></script>
 </body>
 </html>

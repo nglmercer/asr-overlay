@@ -153,8 +153,11 @@ async fn e2e_stop_is_idempotent() {
 async fn e2e_serves_the_config_page_and_its_assets() {
     let server = TestServer::new().await;
 
+    // The config page is a Vue app: its headings render client-side, so the
+    // served shell is pinned by its title instead of a heading. The bundle
+    // needles below still pin the real built assets.
     for (path, needle) in [
-        ("/config", "Preview"),
+        ("/config", "ASR Overlay"),
         ("/config.js", "OverlayStyle"),
         ("/style.js", "caption-text"),
     ] {

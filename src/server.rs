@@ -68,6 +68,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/index.js", get(|| async { serve_embedded("index.js") }))
         .route("/config.js", get(|| async { serve_embedded("config.js") }))
         .route("/style.js", get(|| async { serve_embedded("style.js") }))
+        .route("/vendor.js", get(|| async { serve_embedded("vendor.js") }))
         .route(
             "/assets/{*path}",
             get(

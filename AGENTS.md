@@ -42,8 +42,16 @@ No cloud, no Python runtime, no GPU.
   cairo-rendered PNG caption.
 - **Tray**: `tray-icon` + GTK.
 - **Config**: JSON at `~/.config/asr-overlay/config.json`; edited from the
-  `/config` page, which previews caption styling live via `static/style.js`
-  (shared with the overlay so the preview cannot drift).
+  `/config` page, which previews caption styling live via
+  `frontend/src/shared/style.ts` (shared with the overlay so the preview
+  cannot drift).
+- **Frontend**: Vue 3 + TypeScript in `frontend/` (Vite multi-page build:
+  overlay + settings). `build.rs` runs `npm ci` + `npm run build` and embeds
+  `frontend/dist/`; output names are stable (`index.js`, `config.js`,
+  `style.js`, `vendor.js`) to match the server routes. Set
+  `ASR_OVERLAY_SKIP_FRONTEND_BUILD=1` to embed a prebuilt `dist/` instead.
+  `npm run typecheck` covers `.ts` via native `tsc`; SFC internals await
+  vue-tsc TypeScript 7 support.
 
 ## Commands
 
@@ -57,6 +65,8 @@ No cloud, no Python runtime, no GPU.
 | `cargo clippy -- -D warnings` | Lint |
 | `cargo test` | Unit + integration tests |
 | `cargo build --release` | Production binary |
+| `npm run dev` (in `frontend/`) | Vite dev server, API proxied to `cargo run` |
+| `npm run typecheck` (in `frontend/`) | Typecheck `.ts` with native `tsc` |
 
 ## HTTP Endpoints
 
@@ -89,6 +99,7 @@ No cloud, no Python runtime, no GPU.
 ## Requirements
 
 - Rust 1.70+
+- Node.js v20.19+ or v22.12+ with npm (the build compiles the Vue frontend)
 - ~1.7 GiB disk for the ASR model (fetched on first run)
 - ALSA/PulseAudio headers: `libasound2-dev pkg-config`
 - GTK3 + libayatana-appindicator for the tray
