@@ -57,6 +57,112 @@ impl Default for OverlayStyle {
 use std::fs;
 use std::path::PathBuf;
 
+/// Which transcription backend the pipeline uses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Local ARK-ASR ONNX model. The default, so configs written before
+    /// providers existed keep working unchanged.
+    #[default]
+    Ark,
+    /// `POST {base_url}/audio/transcriptions` (OpenAI, self-hosted Whisper,
+    /// Mistral batch Voxtral, …).
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+    /// Mistral realtime transcription over WebSocket.
+    VoxtralRealtime,
+    /// Gemini Live streaming transcription.
+    GeminiLiveTranscribe,
+    /// Gemini Live streaming translation.
+    GeminiLiveTranslate,
+}
+
+/// Settings for the selected [`ProviderKind`]. Only the fields a provider
+/// needs are shown in the UI; the rest are ignored.
+///
+/// API keys are never stored here — only the *name* of the environment
+/// variable holding the key, resolved server-side at pipeline start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub kind: ProviderKind,
+
+    /// OpenAI-compatible servers: the API root, e.g. `http://localhost:8000/v1`.
+    #[serde(default)]
+    pub base_url: String,
+
+    /// Model id sent to the provider, e.g. `whisper-large-v3`.
+    #[serde(default)]
+    pub model: String,
+
+    /// Environment variable holding the API key, e.g. `MISTRAL_API_KEY`.
+    /// Empty means the endpoint needs no authentication.
+    #[serde(default)]
+    pub api_key_env: String,
+
+    /// Gemini Live translation target, e.g. `es`.
+    #[serde(default)]
+    pub target_language: String,
+
+    /// Streaming providers: how much audio (in ms) is buffered into each
+    /// chunk sent to the provider. ~100 ms matches what realtime APIs expect.
+    #[serde(default = "default_streaming_delay")]
+    pub streaming_delay_ms: u32,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            kind: ProviderKind::Ark,
+            base_url: String::new(),
+            model: String::new(),
+            api_key_env: String::new(),
+            target_language: String::new(),
+            streaming_delay_ms: default_streaming_delay(),
+        }
+    }
+}
+
+impl ProviderConfig {
+    /// True for the providers that stream audio continuously instead of
+    /// transcribing VAD-segmented utterances.
+    pub fn is_streaming(&self) -> bool {
+        matches!(
+            self.kind,
+            ProviderKind::VoxtralRealtime
+                | ProviderKind::GeminiLiveTranscribe
+                | ProviderKind::GeminiLiveTranslate
+        )
+    }
+
+    /// Resolve the API key from [`Self::api_key_env`]. `None` when no
+    /// variable is configured or it is unset/empty — valid for endpoints
+    /// without authentication.
+    pub fn api_key(&self) -> Option<String> {
+        let name = self.api_key_env.trim();
+        if name.is_empty() {
+            return None;
+        }
+        std::env::var(name).ok().filter(|v| !v.is_empty())
+    }
+
+    /// Like [`Self::api_key`], but an error when no key resolves — for the
+    /// providers that cannot work without one.
+    pub fn require_api_key(&self) -> anyhow::Result<String> {
+        let name = self.api_key_env.trim();
+        if name.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Provider {:?} needs an API key: set api_key_env to the variable holding it",
+                self.kind
+            ));
+        }
+        std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Environment variable {name} is not set or empty"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AsrConfig {
     #[serde(default = "default_port")]
@@ -97,6 +203,9 @@ pub struct AsrConfig {
     /// Caption appearance on the overlay page.
     #[serde(default)]
     pub style: OverlayStyle,
+    /// Transcription backend. Defaults to local ARK-ASR.
+    #[serde(default)]
+    pub provider: ProviderConfig,
 }
 
 impl Default for AsrConfig {
@@ -114,8 +223,13 @@ impl Default for AsrConfig {
             input_device: String::new(),
             threads: default_threads(),
             style: OverlayStyle::default(),
+            provider: ProviderConfig::default(),
         }
     }
+}
+
+fn default_streaming_delay() -> u32 {
+    100
 }
 
 fn default_min_audio_ms() -> u64 {
@@ -233,6 +347,7 @@ mod tests {
             input_device: String::new(),
             threads: 4,
             style: OverlayStyle::default(),
+            provider: ProviderConfig::default(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -255,6 +370,160 @@ mod tests {
         let json = "{}";
         let config: AsrConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AsrConfig::default());
+    }
+
+    #[test]
+    fn old_configs_default_to_ark() {
+        // A config written before providers existed has no "provider" key.
+        let json = r#"{
+            "port": 9090, "language": "en", "max_new_tokens": 128,
+            "vad_threshold": 0.01, "threads": 4, "min_audio_ms": 6000
+        }"#;
+        let config: AsrConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.provider.kind, ProviderKind::Ark);
+        assert_eq!(config.provider, ProviderConfig::default());
+
+        // So does an empty provider object.
+        let config: AsrConfig = serde_json::from_str(r#"{"provider": {}}"#).unwrap();
+        assert_eq!(config.provider.kind, ProviderKind::Ark);
+        assert_eq!(config.provider.streaming_delay_ms, 100);
+    }
+
+    #[test]
+    fn all_provider_kinds_roundtrip() {
+        for kind in [
+            ProviderKind::Ark,
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::VoxtralRealtime,
+            ProviderKind::GeminiLiveTranscribe,
+            ProviderKind::GeminiLiveTranslate,
+        ] {
+            let config = ProviderConfig {
+                kind,
+                base_url: "http://localhost:8000/v1".to_string(),
+                model: "test-model".to_string(),
+                api_key_env: "TEST_API_KEY".to_string(),
+                target_language: "es".to_string(),
+                streaming_delay_ms: 120,
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            let parsed: ProviderConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, config, "roundtrip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn provider_kinds_use_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ProviderKind::OpenAiCompatible).unwrap(),
+            serde_json::Value::String("openai_compatible".to_string())
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"gemini_live_translate\"").unwrap(),
+            ProviderKind::GeminiLiveTranslate
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"voxtral_realtime\"").unwrap(),
+            ProviderKind::VoxtralRealtime
+        );
+    }
+
+    #[test]
+    fn example_configs_from_the_spec_parse() {
+        let openai: AsrConfig = serde_json::from_str(
+            r#"{"provider": {"kind": "openai_compatible",
+                "base_url": "http://localhost:8000/v1",
+                "model": "whisper-large-v3", "api_key_env": ""}}"#,
+        )
+        .unwrap();
+        assert_eq!(openai.provider.kind, ProviderKind::OpenAiCompatible);
+        assert_eq!(openai.provider.base_url, "http://localhost:8000/v1");
+
+        let mistral: AsrConfig = serde_json::from_str(
+            r#"{"provider": {"kind": "openai_compatible",
+                "base_url": "https://api.mistral.ai/v1",
+                "model": "voxtral-mini-latest", "api_key_env": "MISTRAL_API_KEY"}}"#,
+        )
+        .unwrap();
+        assert_eq!(mistral.provider.api_key_env, "MISTRAL_API_KEY");
+
+        let gemini: AsrConfig = serde_json::from_str(
+            r#"{"provider": {"kind": "gemini_live_translate",
+                "model": "gemini-3.5-live-translate-preview",
+                "api_key_env": "GEMINI_API_KEY", "target_language": "es"}}"#,
+        )
+        .unwrap();
+        assert_eq!(gemini.provider.kind, ProviderKind::GeminiLiveTranslate);
+        assert_eq!(gemini.provider.target_language, "es");
+    }
+
+    #[test]
+    fn api_keys_are_never_serialized() {
+        // The secret lives in the environment; the config only names it.
+        std::env::set_var("ASR_OVERLAY_TEST_SECRET_KEY", "sk-super-secret-value-12345");
+        let config = AsrConfig {
+            provider: ProviderConfig {
+                kind: ProviderKind::GeminiLiveTranscribe,
+                api_key_env: "ASR_OVERLAY_TEST_SECRET_KEY".to_string(),
+                ..ProviderConfig::default()
+            },
+            ..AsrConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("sk-super-secret-value-12345"),
+            "secret leaked into serialized config: {json}"
+        );
+        assert!(json.contains("ASR_OVERLAY_TEST_SECRET_KEY"));
+        // Resolution still finds the value server-side.
+        assert_eq!(
+            config.provider.api_key().as_deref(),
+            Some("sk-super-secret-value-12345")
+        );
+        std::env::remove_var("ASR_OVERLAY_TEST_SECRET_KEY");
+    }
+
+    #[test]
+    fn api_key_resolution_rules() {
+        let none = ProviderConfig::default();
+        assert_eq!(none.api_key(), None);
+        assert!(none.require_api_key().is_err());
+
+        let missing = ProviderConfig {
+            api_key_env: "ASR_OVERLAY_TEST_DEFINITELY_UNSET".to_string(),
+            ..ProviderConfig::default()
+        };
+        std::env::remove_var("ASR_OVERLAY_TEST_DEFINITELY_UNSET");
+        assert_eq!(missing.api_key(), None);
+        assert!(missing.require_api_key().is_err());
+    }
+
+    #[test]
+    fn streaming_classification() {
+        for kind in [
+            ProviderKind::VoxtralRealtime,
+            ProviderKind::GeminiLiveTranscribe,
+            ProviderKind::GeminiLiveTranslate,
+        ] {
+            assert!(
+                ProviderConfig {
+                    kind,
+                    ..ProviderConfig::default()
+                }
+                .is_streaming(),
+                "{kind:?} must be streaming"
+            );
+        }
+        for kind in [ProviderKind::Ark, ProviderKind::OpenAiCompatible] {
+            assert!(
+                !ProviderConfig {
+                    kind,
+                    ..ProviderConfig::default()
+                }
+                .is_streaming(),
+                "{kind:?} must be utterance-based"
+            );
+        }
     }
 
     #[test]

@@ -26,6 +26,14 @@ No cloud, no Python runtime, no GPU.
   graphs: whisper encoder → MLP adapter → token embedding → Qwen2 decoder with
   an external KV cache. 19 languages, auto-detected. Ported from the official
   `infer_ark_audio_onnx.py`.
+- **Providers**: `asr/provider.rs` (`UtteranceAsr` / `StreamingAsr` /
+  `AsrEngine`, built by `asr::create_engine`). `ark.rs` wraps the local model
+  (lazy load, keeps `min_audio_ms` + token streaming); `openai_compatible.rs`
+  posts WAV to `{base_url}/audio/transcriptions`; `gemini.rs` / `voxtral.rs`
+  stream 16 kHz PCM over WebSocket with reconnect. Utterance providers run the
+  VAD pipeline in `caption::run_pipeline`, streaming ones the continuous
+  `caption::run_streaming_pipeline`. API keys resolve from `api_key_env` at
+  startup and never touch `config.json` or `/settings` output.
 - **Hub**: `hub.rs` — auto-download to `~/.cache/asr-overlay/models/`,
   overridable with `ASR_OVERLAY_CACHE`.
 - **TTS**: `src/tts/` — Audio8 DualAR ONNX INT4. Scaffolding only; every session

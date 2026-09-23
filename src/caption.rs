@@ -1,14 +1,14 @@
 use anyhow::Result;
 use crossbeam_channel::Receiver;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::asr::{StreamingAsr, TranscriptEvent, UtteranceAsr};
 use crate::audio::{resample_mono, AudioChunk};
 use crate::config::AsrConfig;
-use crate::asr::ArkAsr;
 
 /// A subtitle line pushed to all overlay clients.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Caption {
     pub text: String,
     pub start_ms: u64,
@@ -18,6 +18,30 @@ pub struct Caption {
     /// shows them so words appear as they are recognized.
     #[serde(default)]
     pub partial: bool,
+    /// True once the text is final and will not change. Old clients ignore
+    /// the field; old servers omit it, which deserializes as `false`.
+    #[serde(default)]
+    pub final_: bool,
+}
+
+/// Convert one streaming provider event into the caption it updates.
+pub fn caption_from_event(event: &TranscriptEvent, start_ms: u64) -> Caption {
+    match event {
+        TranscriptEvent::Partial(text) => Caption {
+            text: text.clone(),
+            start_ms,
+            end_ms: 0,
+            partial: true,
+            final_: false,
+        },
+        TranscriptEvent::Final(text) => Caption {
+            text: text.clone(),
+            start_ms,
+            end_ms: timestamp_ms(),
+            partial: false,
+            final_: true,
+        },
+    }
 }
 
 /// Audio kept from before the threshold is crossed, so an utterance starts on
@@ -178,15 +202,17 @@ pub fn to_stt_rate(speech: &[f32], mic_rate: u32) -> Result<Vec<f32>> {
 /// Run the segmentation loop: drain `rx` chunks, transcribe closed utterances
 /// with `asr`, and report results through `emit`.
 ///
-/// Exits when the audio channel closes or `stop_rx` fires.
+/// Used by the utterance providers (ARK, OpenAI-compatible). Exits when the
+/// audio channel closes or `stop_rx` fires.
 pub fn run_pipeline(
     rx: Receiver<AudioChunk>,
     stop_rx: Receiver<()>,
     mic_rate: u32,
     config: AsrConfig,
-    mut asr: ArkAsr,
+    mut asr: Box<dyn UtteranceAsr>,
     mut emit: impl FnMut(Caption) + Send + 'static,
 ) -> Result<()> {
+    let language = crate::asr::effective_language(&config.language).map(str::to_string);
     let mut pipeline = CaptionPipeline::new(mic_rate, config);
     // Chunk size is fixed by the audio backend; remember it to size the backlog.
     let mut backlog_chunk_samples;
@@ -223,17 +249,19 @@ pub fn run_pipeline(
 
             let started = timestamp_ms();
             let mut showed_partial = false;
-            let streamed = asr.transcribe_streaming(&audio_16k, |partial| {
-                if !partial.is_empty() {
-                    showed_partial = true;
-                    emit(Caption {
-                        text: partial.to_string(),
-                        start_ms: started,
-                        end_ms: 0,
-                        partial: true,
-                    });
-                }
-            });
+            let streamed =
+                asr.transcribe_with_partials(&audio_16k, language.as_deref(), &mut |partial| {
+                    if !partial.is_empty() {
+                        showed_partial = true;
+                        emit(Caption {
+                            text: partial.to_string(),
+                            start_ms: started,
+                            end_ms: 0,
+                            partial: true,
+                            final_: false,
+                        });
+                    }
+                });
 
             match streamed {
                 Ok(text) if !text.is_empty() => {
@@ -243,6 +271,7 @@ pub fn run_pipeline(
                         start_ms: started,
                         end_ms: timestamp_ms(),
                         partial: false,
+                        final_: true,
                     });
                 }
                 Ok(_) => {
@@ -255,6 +284,7 @@ pub fn run_pipeline(
                             start_ms: started,
                             end_ms: timestamp_ms(),
                             partial: false,
+                            final_: true,
                         });
                     }
                 }
@@ -265,6 +295,120 @@ pub fn run_pipeline(
         }
     }
     log::info!("Pipeline channel closed, stopping");
+    Ok(())
+}
+
+/// Run the streaming loop: resample mic audio continuously to 16 kHz mono
+/// `i16`, feed it to a [`StreamingAsr`] provider on its own thread, and turn
+/// its [`TranscriptEvent`]s into captions.
+///
+/// Used by the realtime providers (Gemini Live, Voxtral). There is no VAD
+/// buffering and no `min_audio_ms` padding here: the provider segments speech
+/// itself, and holding audio back would only add latency.
+///
+/// Exits when the audio channel closes or `stop_rx` fires.
+pub fn run_streaming_pipeline(
+    rx: Receiver<AudioChunk>,
+    stop_rx: Receiver<()>,
+    mic_rate: u32,
+    config: AsrConfig,
+    engine: Box<dyn StreamingAsr>,
+    mut emit: impl FnMut(Caption) + Send + 'static,
+) -> Result<()> {
+    // ~100 ms of 16 kHz audio per provider chunk, bounded to something sane
+    // even for odd configurations.
+    let chunk_samples =
+        (config.provider.streaming_delay_ms.clamp(20, 1000) as usize * 16_000 / 1000).max(1);
+
+    let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<i16>>(32);
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<TranscriptEvent>();
+    let (inner_stop_tx, inner_stop_rx) = crossbeam_channel::bounded::<()>(1);
+
+    let worker = std::thread::Builder::new()
+        .name("asr-streaming".into())
+        .spawn(move || {
+            if let Err(e) = engine.run(audio_rx, event_tx, inner_stop_rx) {
+                log::error!("Streaming ASR error: {e}");
+            }
+        })?;
+
+    log::info!("Streaming pipeline running at {mic_rate} Hz ({chunk_samples} samples/chunk)");
+    let mut pending: Vec<i16> = Vec::with_capacity(chunk_samples * 2);
+    let mut started = timestamp_ms();
+
+    enum Incoming {
+        Audio(AudioChunk),
+        Event(TranscriptEvent),
+        AudioClosed,
+        EventsClosed,
+        Stop,
+    }
+
+    loop {
+        // The select resolves first and the match below acts on it, so every
+        // exit path funnels through the same shutdown sequence.
+        let incoming = crossbeam_channel::select! {
+            recv(rx) -> chunk => match chunk {
+                Ok(chunk) => Incoming::Audio(chunk),
+                Err(_) => Incoming::AudioClosed,
+            },
+            recv(event_rx) -> event => match event {
+                Ok(event) => Incoming::Event(event),
+                Err(_) => Incoming::EventsClosed,
+            },
+            recv(stop_rx) -> _ => Incoming::Stop,
+        };
+        match incoming {
+            Incoming::Audio(chunk) => {
+                let audio_16k = to_stt_rate(&chunk, mic_rate)?;
+                pending.extend(
+                    audio_16k
+                        .iter()
+                        .map(|s| crate::asr::provider::f32_to_i16(*s)),
+                );
+                let mut provider_gone = false;
+                while pending.len() >= chunk_samples {
+                    let out: Vec<i16> = pending.drain(..chunk_samples).collect();
+                    if audio_tx.send(out).is_err() {
+                        provider_gone = true;
+                        break;
+                    }
+                }
+                if provider_gone {
+                    log::warn!("Streaming provider gone; stopping");
+                    break;
+                }
+            }
+            Incoming::Event(event) => {
+                if matches!(event, TranscriptEvent::Final(_)) {
+                    let caption = caption_from_event(&event, started);
+                    started = timestamp_ms();
+                    if !caption.text.is_empty() {
+                        emit(caption);
+                    }
+                } else {
+                    emit(caption_from_event(&event, started));
+                }
+            }
+            Incoming::AudioClosed | Incoming::EventsClosed | Incoming::Stop => break,
+        }
+    }
+
+    // Flush the tail so the provider hears the last few milliseconds, then
+    // shut it down and wait for it before returning.
+    if !pending.is_empty() {
+        let _ = audio_tx.send(std::mem::take(&mut pending));
+    }
+    drop(audio_tx);
+    let _ = inner_stop_tx.send(());
+    if worker.join().is_err() {
+        log::warn!("Streaming provider thread panicked while stopping");
+    }
+    // Emit anything the provider finished while we were shutting down.
+    while let Ok(event) = event_rx.try_recv() {
+        emit(caption_from_event(&event, started));
+    }
+    log::info!("Streaming pipeline stopped");
     Ok(())
 }
 
@@ -310,7 +454,9 @@ mod tests {
 
     fn chunk(duration_ms: f32, rate: u32, amplitude: f32) -> AudioChunk {
         let n = (rate as f32 * duration_ms / 1000.0).round() as usize;
-        (0..n).map(|i| amplitude * ((i as f32) * 0.1).sin()).collect()
+        (0..n)
+            .map(|i| amplitude * ((i as f32) * 0.1).sin())
+            .collect()
     }
 
     #[test]
@@ -431,6 +577,44 @@ mod tests {
     }
 
     #[test]
+    fn partial_and_final_events_convert_to_captions() {
+        let partial = caption_from_event(&TranscriptEvent::Partial("hola".to_string()), 1234);
+        assert_eq!(partial.text, "hola");
+        assert_eq!(partial.start_ms, 1234);
+        assert_eq!(partial.end_ms, 0);
+        assert!(partial.partial);
+        assert!(!partial.final_);
+
+        let before = timestamp_ms();
+        let done = caption_from_event(&TranscriptEvent::Final("hola mundo".to_string()), 1234);
+        assert_eq!(done.text, "hola mundo");
+        assert_eq!(done.start_ms, 1234);
+        assert!(done.end_ms >= before);
+        assert!(!done.partial);
+        assert!(done.final_);
+    }
+
+    #[test]
+    fn captions_stay_compatible_with_old_clients() {
+        // Old servers omit `final_`; it defaults to false.
+        let old: Caption =
+            serde_json::from_str(r#"{"text": "hi", "start_ms": 1, "end_ms": 2}"#).unwrap();
+        assert!(!old.partial);
+        assert!(!old.final_);
+        let old_partial: Caption =
+            serde_json::from_str(r#"{"text": "hi", "start_ms": 1, "end_ms": 0, "partial": true}"#)
+                .unwrap();
+        assert!(old_partial.partial);
+        assert!(!old_partial.final_);
+
+        // New servers always send it; old clients ignore unknown fields.
+        let caption = caption_from_event(&TranscriptEvent::Final("hi".to_string()), 1);
+        let json = serde_json::to_string(&caption).unwrap();
+        assert!(json.contains("\"final_\":true"), "{json}");
+        assert!(json.contains("\"partial\":false"), "{json}");
+    }
+
+    #[test]
     fn test_flush_returns_pending() {
         let config = AsrConfig {
             vad_threshold: 0.001,
@@ -444,5 +628,129 @@ mod tests {
         let flushed = p.flush();
         assert!(flushed.is_some());
         assert!(!flushed.unwrap().is_empty());
+    }
+
+    struct FakeUtterance;
+
+    impl crate::asr::UtteranceAsr for FakeUtterance {
+        fn transcribe(
+            &mut self,
+            pcm_16k: &[f32],
+            _language: Option<&str>,
+        ) -> anyhow::Result<String> {
+            assert!(!pcm_16k.is_empty());
+            Ok("hello world".to_string())
+        }
+    }
+
+    #[test]
+    fn utterance_pipeline_transcribes_vad_segments() {
+        let config = AsrConfig {
+            vad_threshold: 0.001,
+            vad_silence_ms: 50,
+            vad_min_ms: 10,
+            vad_max_ms: 5000,
+            ..AsrConfig::default()
+        };
+        let (tx, rx) = crossbeam_channel::unbounded::<AudioChunk>();
+        let (_stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
+        let (cap_tx, cap_rx) = crossbeam_channel::unbounded::<Caption>();
+
+        let handle = std::thread::spawn(move || {
+            run_pipeline(
+                rx,
+                stop_rx,
+                16_000,
+                config,
+                Box::new(FakeUtterance),
+                move |caption| {
+                    let _ = cap_tx.send(caption);
+                },
+            )
+        });
+
+        tx.send(chunk(200.0, 16_000, 0.5)).unwrap();
+        tx.send(vec![0.0f32; 960]).unwrap(); // closes the utterance
+        drop(tx);
+        handle.join().unwrap().unwrap();
+
+        let captions: Vec<Caption> = cap_rx.try_iter().collect();
+        assert_eq!(captions.len(), 1);
+        assert_eq!(captions[0].text, "hello world");
+        assert!(!captions[0].partial);
+        assert!(captions[0].final_);
+    }
+
+    struct FakeStreaming;
+
+    impl crate::asr::StreamingAsr for FakeStreaming {
+        fn run(
+            self: Box<Self>,
+            audio_rx: crossbeam_channel::Receiver<Vec<i16>>,
+            event_tx: crossbeam_channel::Sender<TranscriptEvent>,
+            stop_rx: crossbeam_channel::Receiver<()>,
+        ) -> anyhow::Result<()> {
+            let mut sent = false;
+            loop {
+                let done = crossbeam_channel::select! {
+                    recv(audio_rx) -> chunk => match chunk {
+                        Ok(_) => {
+                            if !sent {
+                                sent = true;
+                                let _ = event_tx.send(TranscriptEvent::Partial("hel".to_string()));
+                                let _ = event_tx.send(TranscriptEvent::Final("hello".to_string()));
+                            }
+                            false
+                        }
+                        Err(_) => true,
+                    },
+                    recv(stop_rx) -> _ => true,
+                };
+                if done {
+                    break;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn streaming_pipeline_forwards_events_without_vad() {
+        let mut config = AsrConfig::default();
+        config.provider.streaming_delay_ms = 100; // 1600 samples per chunk
+        let (tx, rx) = crossbeam_channel::unbounded::<AudioChunk>();
+        let (_stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
+        let (cap_tx, cap_rx) = crossbeam_channel::unbounded::<Caption>();
+
+        let handle = std::thread::spawn(move || {
+            run_streaming_pipeline(
+                rx,
+                stop_rx,
+                16_000,
+                config,
+                Box::new(FakeStreaming),
+                move |caption| {
+                    let _ = cap_tx.send(caption);
+                },
+            )
+        });
+
+        // Audio flows straight through: no speech/silence pattern needed.
+        tx.send(vec![0.01f32; 1600]).unwrap();
+        let first = cap_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let second = cap_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(tx);
+        handle.join().unwrap().unwrap();
+
+        assert_eq!(first.text, "hel");
+        assert!(first.partial);
+        assert!(!first.final_);
+        assert_eq!(second.text, "hello");
+        assert!(!second.partial);
+        assert!(second.final_);
     }
 }

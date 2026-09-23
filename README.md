@@ -192,6 +192,17 @@ server usually holds the sound card, so its sources are the ones that can
 actually be captured — the picker only lists devices that open. A device that
 is gone or busy falls back to the default rather than refusing to listen.
 
+## Transcription providers
+
+`ark` (local ARK-ASR) is the default; the `/config` page also offers
+`openai_compatible` (`POST {base_url}/audio/transcriptions`, for OpenAI,
+self-hosted Whisper and Mistral batch Voxtral) and realtime streaming via
+`voxtral_realtime`, `gemini_live_transcribe` and `gemini_live_translate`.
+Streaming providers receive continuous 16 kHz PCM and emit partial/final
+captions — no VAD segmentation, no `min_audio_ms` padding. API keys are never
+stored in `config.json`: set `api_key_env` to the variable holding the key
+(e.g. `GEMINI_API_KEY`) and it is resolved server-side when listening starts.
+
 ## HTTP Endpoints
 
 | Method | Path | Description |

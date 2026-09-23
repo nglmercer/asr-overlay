@@ -26,7 +26,53 @@
         ['language', 'text'], ['input_device', 'text'], ['threads', 'number'], ['max_new_tokens', 'number'],
         ['vad_threshold', 'float'], ['vad_silence_ms', 'number'],
         ['vad_min_ms', 'number'], ['vad_max_ms', 'number'], ['min_audio_ms', 'number'],
+        ['provider_kind', 'text'], ['provider_base_url', 'text'], ['provider_model', 'text'],
+        ['provider_api_key_env', 'text'], ['provider_target_language', 'text'],
+        ['provider_streaming_delay_ms', 'number'],
     ];
+
+    const STREAMING_KINDS = ['voxtral_realtime', 'gemini_live_transcribe', 'gemini_live_translate'];
+    const UTTERANCE_HTTP_KINDS = ['openai_compatible'];
+
+    // Show only the settings the selected provider uses. ARK-only knobs
+    // (threads, max tokens, padding) and the VAD panel hide for realtime
+    // providers, which segment speech themselves.
+    const updateProviderVisibility = () => {
+        const kind = $('provider_kind').value;
+        const isArk = kind === 'ark';
+        const isHttp = UTTERANCE_HTTP_KINDS.includes(kind);
+        const isStreaming = STREAMING_KINDS.includes(kind);
+        const show = (id, visible) => { $(id).style.display = visible ? '' : 'none'; };
+
+        show('provider_base_url_field', isHttp);
+        show('provider_model_field', !isArk);
+        show('provider_api_key_env_field', !isArk);
+        show('provider_api_key_env_hint', !isArk);
+        show('provider_target_language_field', kind === 'gemini_live_translate');
+        show('provider_streaming_delay_field', isStreaming);
+        show('provider_streaming_delay_hint', isStreaming);
+
+        show('field_threads', isArk);
+        show('field_max_new_tokens', isArk);
+        show('ark-only-hint', isArk);
+        show('field_min_audio_ms', isArk);
+        show('min_audio_ms_hint', isArk);
+        show('panel_vad', !isStreaming);
+
+        const placeholders = {
+            openai_compatible: ['http://localhost:8000/v1', 'whisper-large-v3'],
+            voxtral_realtime: ['', 'voxtral-mini-latest'],
+            gemini_live_transcribe: ['', 'gemini-2.0-flash-live-001'],
+            gemini_live_translate: ['', 'gemini-2.0-flash-live-001'],
+        };
+        if (placeholders[kind]) {
+            $('provider_base_url').placeholder = placeholders[kind][0];
+            $('provider_model').placeholder = placeholders[kind][1];
+        }
+        $('language-hint').textContent = isHttp
+            ? 'Sent to the transcription server as a hint; use Auto-detect to let the server decide.'
+            : 'ARK-ASR detects the spoken language on its own, so this is a label only — it does not change or translate the output.';
+    };
 
     let config = null;
 
@@ -115,6 +161,16 @@
         $('vad_max_ms').value = cfg.vad_max_ms;
         $('min_audio_ms').value = cfg.min_audio_ms;
 
+        // Configs written before providers existed have no provider object.
+        const p = cfg.provider || {};
+        $('provider_kind').value = p.kind || 'ark';
+        $('provider_base_url').value = p.base_url || '';
+        $('provider_model').value = p.model || '';
+        $('provider_api_key_env').value = p.api_key_env || '';
+        $('provider_target_language').value = p.target_language || '';
+        $('provider_streaming_delay_ms').value = p.streaming_delay_ms ?? 100;
+        updateProviderVisibility();
+
         $('font_family').value = s.font_family;
         $('font_size').value = s.font_size;
         $('font_weight').value = s.font_weight;
@@ -157,6 +213,14 @@
         vad_min_ms: +$('vad_min_ms').value,
         vad_max_ms: +$('vad_max_ms').value,
         min_audio_ms: +$('min_audio_ms').value,
+        provider: {
+            kind: $('provider_kind').value,
+            base_url: $('provider_base_url').value.trim(),
+            model: $('provider_model').value.trim(),
+            api_key_env: $('provider_api_key_env').value.trim(),
+            target_language: $('provider_target_language').value.trim(),
+            streaming_delay_ms: +$('provider_streaming_delay_ms').value || 100,
+        },
         style: readStyle(),
     });
 
@@ -257,6 +321,8 @@
         const el = $(id);
         if (el) el.addEventListener('input', onEdit);
     }
+    // Provider switches reshape the form immediately.
+    $('provider_kind').addEventListener('input', updateProviderVisibility);
     $('preview-text').addEventListener('input', renderPreview);
 
     // Colour picker <-> CSS text, in both directions.

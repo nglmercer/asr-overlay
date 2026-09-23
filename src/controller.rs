@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use crate::asr::AsrEngine;
 use crate::audio::open_microphone;
-use crate::caption::run_pipeline;
+use crate::caption::{run_pipeline, run_streaming_pipeline};
 use crate::server::AppState;
 
 /// Global, singly-created pipeline controller. The server and tray both use it
@@ -49,6 +50,11 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
     let _starting = StartGuard;
 
     let config = state.config.lock().clone();
+    // Fail fast on missing credentials instead of starting a pipeline that
+    // would only error once it is already running.
+    if config.provider.is_streaming() {
+        config.provider.require_api_key()?;
+    }
     let caption_tx = state.caption_tx.clone();
     let last_caption = Arc::clone(&state.last_caption);
 
@@ -65,13 +71,12 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             // Keep the mic (and its stream) alive across run_pipeline.
             let mic = mic;
 
-            let asr = match crate::asr::load(config.threads, config.max_new_tokens) {
-                Ok(mut asr) => {
-                    asr.set_min_audio_ms(config.min_audio_ms);
-                    asr
-                }
+            // Provider and network work stays on this worker thread — never on
+            // the cpal audio callback thread, which only forwards samples.
+            let engine = match crate::asr::create_engine(&config) {
+                Ok(engine) => engine,
                 Err(e) => {
-                    log::error!("Failed to load the ASR model: {e}");
+                    log::error!("Failed to create the ASR engine: {e}");
                     return;
                 }
             };
@@ -81,7 +86,19 @@ pub fn start(state: Arc<AppState>) -> anyhow::Result<()> {
                 let _ = caption_tx.send(caption);
             };
 
-            if let Err(e) = run_pipeline(mic.rx, stop_rx, mic_rate, config, asr, emit) {
+            let result = match engine {
+                AsrEngine::Utterance(mut asr) => {
+                    if let Err(e) = asr.prepare() {
+                        log::error!("Failed to load the ASR model: {e}");
+                        return;
+                    }
+                    run_pipeline(mic.rx, stop_rx, mic_rate, config, asr, emit)
+                }
+                AsrEngine::Streaming(engine) => {
+                    run_streaming_pipeline(mic.rx, stop_rx, mic_rate, config, engine, emit)
+                }
+            };
+            if let Err(e) = result {
                 log::error!("Pipeline stopped with error: {e}");
             }
             // Dropping `mic` closes the cpal stream, releasing the device.

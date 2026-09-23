@@ -925,18 +925,67 @@
                     label only — it does not change or translate the output.
                 </p>
                 <div class="row">
-                    <div class="field">
+                    <div class="field" id="field_threads">
                         <label for="threads">Threads</label>
                         <input type="number" id="threads" min="1" max="32">
                     </div>
-                    <div class="field">
+                    <div class="field" id="field_max_new_tokens">
                         <label for="max_new_tokens">Max tokens</label>
                         <input type="number" id="max_new_tokens" min="16" max="1024" step="16">
                     </div>
                 </div>
+                <p class="hint" id="ark-only-hint">
+                    Threads and max tokens only apply to the local ARK-ASR model.
+                </p>
             </div>
 
             <div class="panel">
+                <h2>Provider</h2>
+                <div class="field">
+                    <label for="provider_kind">Transcription provider</label>
+                    <select id="provider_kind">
+                        <option value="ark">Local ARK-ASR (on-device)</option>
+                        <option value="openai_compatible">OpenAI-compatible HTTP</option>
+                        <option value="voxtral_realtime">Mistral Voxtral realtime</option>
+                        <option value="gemini_live_transcribe">Gemini Live transcription</option>
+                        <option value="gemini_live_translate">Gemini Live translation</option>
+                    </select>
+                </div>
+                <p class="hint">
+                    Switching provider, model, base URL, or API-key variable
+                    restarts listening automatically.
+                </p>
+                <div class="field" id="provider_base_url_field">
+                    <label for="provider_base_url">Base URL</label>
+                    <input type="text" id="provider_base_url" placeholder="http://localhost:8000/v1">
+                </div>
+                <div class="field" id="provider_model_field">
+                    <label for="provider_model">Model</label>
+                    <input type="text" id="provider_model" placeholder="whisper-large-v3">
+                </div>
+                <div class="field" id="provider_api_key_env_field">
+                    <label for="provider_api_key_env">API key environment variable</label>
+                    <input type="text" id="provider_api_key_env" placeholder="MISTRAL_API_KEY" spellcheck="false">
+                </div>
+                <p class="hint" id="provider_api_key_env_hint">
+                    Only the variable <em>name</em> is stored — never the key
+                    itself. Leave empty for servers without authentication.
+                </p>
+                <div class="field" id="provider_target_language_field">
+                    <label for="provider_target_language">Target language</label>
+                    <input type="text" id="provider_target_language" placeholder="es">
+                </div>
+                <div class="field" id="provider_streaming_delay_field">
+                    <label for="provider_streaming_delay_ms">Streaming chunk (ms)</label>
+                    <input type="number" id="provider_streaming_delay_ms" min="20" max="1000" step="10">
+                </div>
+                <p class="hint" id="provider_streaming_delay_hint">
+                    How much audio is buffered into each chunk sent to realtime
+                    providers. Around 100 ms is what they expect.
+                </p>
+            </div>
+
+            <div class="panel" id="panel_vad">
                 <h2>Voice detection</h2>
                 <div class="row">
                     <div class="field">
@@ -958,17 +1007,18 @@
                         <input type="number" id="vad_max_ms" step="500" min="1000">
                     </div>
                 </div>
-                <div class="row">
+                <div class="row" id="field_min_audio_ms">
                     <div class="field">
                         <label for="min_audio_ms">Pad short audio to (ms)</label>
                         <input type="number" id="min_audio_ms" step="500" min="0">
                     </div>
                 </div>
-                <p class="hint">
+                <p class="hint" id="min_audio_ms_hint">
                     Short clips make the model fall back on its own priors and
                     answer in the wrong language, so anything shorter than this
                     is padded with silence. Higher is more accurate and slower —
                     8000 is the measured sweet spot, 6000 already drifts.
+                    ARK-ASR only; other providers receive audio as segmented.
                 </p>
             </div>
 

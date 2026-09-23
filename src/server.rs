@@ -70,9 +70,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/style.js", get(|| async { serve_embedded("style.js") }))
         .route(
             "/assets/{*path}",
-            get(|axum::extract::Path(path): axum::extract::Path<String>| async move {
-                serve_embedded(&format!("assets/{path}"))
-            }),
+            get(
+                |axum::extract::Path(path): axum::extract::Path<String>| async move {
+                    serve_embedded(&format!("assets/{path}"))
+                },
+            ),
         )
         .layer(middleware::from_fn_with_state(
             rl.clone(),
@@ -211,17 +213,25 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (StatusCode::OK, axum::Json(config)).into_response()
 }
 
+/// True when a settings change only takes effect on a pipeline restart.
+///
+/// The capture thread copies its config when it starts, so the input device,
+/// the ARK-only knobs, and everything describing the provider require a
+/// restart. The rest (VAD windows, style, …) is read live.
+pub fn config_needs_restart(old: &AsrConfig, new: &AsrConfig) -> bool {
+    old.input_device != new.input_device
+        || old.threads != new.threads
+        || old.min_audio_ms != new.min_audio_ms
+        || old.provider != new.provider
+}
+
 async fn set_config(
     State(state): State<Arc<AppState>>,
     axum::Json(config): axum::Json<AsrConfig>,
 ) -> StatusCode {
     let (saved, needs_restart) = {
         let mut guard = state.config.lock();
-        // The capture thread copies its config when it starts, so these two
-        // only take effect on a restart. Everything else is read live.
-        let needs_restart = guard.input_device != config.input_device
-            || guard.threads != config.threads
-            || guard.min_audio_ms != config.min_audio_ms;
+        let needs_restart = config_needs_restart(&guard, &config);
         *guard = config;
         (guard.clone(), needs_restart)
     };
@@ -234,7 +244,7 @@ async fn set_config(
         // it off the async runtime's worker threads.
         let state = Arc::clone(&state);
         tokio::task::spawn_blocking(move || {
-            log::info!("Input device or thread count changed — restarting capture");
+            log::info!("Capture settings changed — restarting the pipeline");
             crate::controller::stop();
             if let Err(e) = crate::controller::start(Arc::clone(&state)) {
                 log::error!("Failed to restart capture: {e}");
@@ -374,10 +384,67 @@ async fn stop_listening(State(state): State<Arc<AppState>>) -> Json<StopResponse
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderKind;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    #[test]
+    fn provider_changes_need_a_restart() {
+        let old = AsrConfig::default();
+        // Provider kind, model, base URL, API-key env, target language and
+        // streaming delay each restart the pipeline when listening.
+        for mutate in [
+            |c: &mut AsrConfig| c.provider.kind = ProviderKind::GeminiLiveTranscribe,
+            |c: &mut AsrConfig| c.provider.model = "other".to_string(),
+            |c: &mut AsrConfig| c.provider.base_url = "http://x:8000/v1".to_string(),
+            |c: &mut AsrConfig| c.provider.api_key_env = "OTHER_KEY".to_string(),
+            |c: &mut AsrConfig| c.provider.target_language = "fr".to_string(),
+            |c: &mut AsrConfig| c.provider.streaming_delay_ms = 200,
+            |c: &mut AsrConfig| c.input_device = "pw:mic".to_string(),
+            |c: &mut AsrConfig| c.threads += 1,
+            |c: &mut AsrConfig| c.min_audio_ms = 1000,
+        ] {
+            let mut new = old.clone();
+            mutate(&mut new);
+            assert!(config_needs_restart(&old, &new));
+        }
+    }
+
+    #[test]
+    fn live_settings_do_not_restart() {
+        let old = AsrConfig::default();
+        for mutate in [
+            |c: &mut AsrConfig| c.vad_threshold = 0.5,
+            |c: &mut AsrConfig| c.vad_silence_ms = 1,
+            |c: &mut AsrConfig| c.language = "en".to_string(),
+            |c: &mut AsrConfig| c.style.font_size = 99,
+            |c: &mut AsrConfig| c.max_new_tokens = 64,
+        ] {
+            let mut new = old.clone();
+            mutate(&mut new);
+            assert!(!config_needs_restart(&old, &new));
+        }
+        assert!(!config_needs_restart(&old, &old.clone()));
+    }
+
+    #[test]
+    fn settings_never_contain_secrets() {
+        std::env::set_var("ASR_OVERLAY_TEST_SERVER_KEY", "sk-server-secret");
+        let config = AsrConfig {
+            provider: crate::config::ProviderConfig {
+                api_key_env: "ASR_OVERLAY_TEST_SERVER_KEY".to_string(),
+                ..crate::config::ProviderConfig::default()
+            },
+            ..AsrConfig::default()
+        };
+        // GET /settings serializes this struct, so whatever it holds is what
+        // the endpoint returns.
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("sk-server-secret"), "{json}");
+        std::env::remove_var("ASR_OVERLAY_TEST_SERVER_KEY");
+    }
 
     fn test_state() -> Arc<AppState> {
         let (caption_tx, _rx) = broadcast::channel(16);
