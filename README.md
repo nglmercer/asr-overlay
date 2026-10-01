@@ -1,28 +1,64 @@
 # asr-overlay
 
-An overlay for **OBS Browser Source** that listens to the microphone in real
-time and generates live subtitles. Everything runs locally on CPU, using
-**Audio8 ARK-ASR 0.6B** (INT8 ONNX) for speech recognition.
+An overlay for **OBS Browser Source** that listens to the microphone and generates
+live subtitles. **Phonon-2** is the default provider: a 164 MB English-only model
+served locally by Fermion's CPU runtime. The Rust overlay sends VAD-segmented
+16 kHz WAV audio to that server; no GPU or cloud service is required.
 
-The long-term goal is a full voice assistant overlay:
-**mic → ARK-ASR → subtitles → Audio8 TTS → spoken playback**, with no cloud
-services, no Python runtime and no GPU.
+Multilingual **Audio8 ARK-ASR 0.6B** (INT8 ONNX, in-process CPU inference) remains
+available in `/config`. Audio8 TTS playback is planned.
 
-## Quick start
+## Quick start (Phonon-2, CPU only)
+
+Install the upstream server in a separate Python environment. On Linux:
+
+```bash
+python3 -m venv .venv-phonon
+source .venv-phonon/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install fermion-research safetensors soundfile scipy zstandard
+fermion serve phonon-2 --port 8000
+```
+
+In another terminal, start the overlay:
 
 ```bash
 cargo run
 ```
 
-That's it. On first run the ASR model (~1.7 GiB) is downloaded automatically
-into `~/.cache/asr-overlay/models/` and reused from then on — the same way
-`transformers` caches models. Then point an OBS Browser Source at `http://localhost:8080/`, and open
+The server downloads and caches Phonon-2 on first use. Keep it running while
+listening. Point OBS Browser Source at `http://localhost:8080/` and open
 `http://localhost:8080/config` to pick a microphone and style the captions.
+The default Phonon base URL is `http://127.0.0.1:8000/v1`, model `phonon-2`,
+with no API key. The overlay checks the server's model list before listening.
+A stopped server produces a setup error; it does not fall back to another model.
+Choose English or Auto-detect for Phonon; other language hints are rejected.
+
+### Runtime support
+
+The [Phonon-2 model repository](https://huggingface.co/FermionResearch/Phonon-2)
+publishes packed weights, **no ONNX graphs**. The supported CPU engine uses
+PyTorch on Linux x86-64 (AVX2) and Arm64 (NEON), Windows x86-64, and macOS;
+Apple silicon also supports MLX. See the upstream
+[CPU guide](https://github.com/fermionresearch/phonon/blob/main/docs/cpu.md) and
+[server API](https://github.com/fermionresearch/phonon/blob/main/docs/server.md).
+The integration uses the supported HTTP API rather than attempting an
+unverified ONNX conversion. Fermion's published CPU container is another
+installation option. Model weights are CC-BY-4.0, derived from NVIDIA Parakeet;
+the upstream runtime code is Apache-2.0.
+
+### Use ARK instead
+
+Select **Local ARK-ASR** in `/config` for 19-language recognition without a
+separate Python server. Its ~1.7 GiB ONNX model downloads automatically to
+`~/.cache/asr-overlay/models/`. Explicitly saved provider selections are kept;
+new configurations and configurations without a provider use Phonon-2.
 
 Set `ASR_OVERLAY_CACHE` to put the cache somewhere else.
 
 ## Current state
 
+- [x] Phonon-2 local CPU server provider (default, English only)
 - [x] HTTP server (axum) serving an overlay page for OBS
 - [x] Live microphone capture (CPAL) with start/stop from tray, HTTP and WebSocket
 - [x] RMS-energy VAD — continuous listening, no push-to-talk
@@ -194,7 +230,8 @@ is gone or busy falls back to the default rather than refusing to listen.
 
 ## Transcription providers
 
-`ark` (local ARK-ASR) is the default; the `/config` page also offers
+`phonon` (local Phonon-2 CPU server, English only) is the default;
+`ark` runs multilingual ARK-ASR in-process. The `/config` page also offers
 `openai_compatible` (`POST {base_url}/audio/transcriptions`, for OpenAI,
 self-hosted Whisper and Mistral batch Voxtral) and realtime streaming via
 `voxtral_realtime`, `gemini_live_transcribe` and `gemini_live_translate`.
@@ -242,9 +279,12 @@ npm run typecheck
 
 ## Requirements
 
+- For the default provider: a separately running Fermion Phonon-2 CPU server
+  (Python/PyTorch, or the upstream CPU container)
 - Rust toolchain (1.70+)
 - Node.js v20.19+ or v22.12+ with npm (builds the frontend)
-- ~1.7 GiB of disk for the ASR model (downloaded on first run)
+- 164 MB Phonon-2 model download plus upstream CPU runtime dependencies;
+  ~1.7 GiB model disk if using ARK (downloaded on first run)
 - Linux audio deps: `libasound2-dev pkg-config`
 - GTK3 + libayatana-appindicator (tray) and cairo dev headers (PNG captions)
 
