@@ -61,7 +61,9 @@ export function useSettings() {
   // --- provider-driven visibility --------------------------------------
   const providerKind = computed(() => config.provider.kind)
   const isArk = computed(() => providerKind.value === 'ark')
-  const isHttp = computed(() => providerKind.value === 'openai_compatible')
+  const isHttp = computed(
+    () => providerKind.value === 'openai_compatible' || providerKind.value === 'phonon',
+  )
   const isStreaming = computed(
     () =>
       providerKind.value === 'voxtral_realtime' ||
@@ -72,6 +74,8 @@ export function useSettings() {
 
   const modelPlaceholder = computed(() => {
     switch (providerKind.value) {
+      case 'phonon':
+        return 'phonon-2'
       case 'openai_compatible':
         return 'whisper-large-v3'
       case 'voxtral_realtime':
@@ -85,7 +89,9 @@ export function useSettings() {
   })
 
   const languageHint = computed(() =>
-    isHttp.value
+    providerKind.value === 'phonon'
+      ? 'Phonon-2 supports English only. Choose Auto-detect or English; other languages are rejected.'
+      : isHttp.value
       ? 'Sent to the transcription server as a hint; use Auto-detect to let the server decide.'
       : 'ARK-ASR detects the spoken language on its own, so this is a label only — it does not change or translate the output.',
   )

@@ -61,9 +61,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
-    /// Local ARK-ASR ONNX model. The default, so configs written before
-    /// providers existed keep working unchanged.
+    /// Local Phonon-2 CPU server (English only).
     #[default]
+    Phonon,
+    /// Local multilingual ARK-ASR ONNX model.
     Ark,
     /// `POST {base_url}/audio/transcriptions` (OpenAI, self-hosted Whisper,
     /// Mistral batch Voxtral, …).
@@ -113,7 +114,7 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            kind: ProviderKind::Ark,
+            kind: ProviderKind::Phonon,
             base_url: String::new(),
             model: String::new(),
             api_key_env: String::new(),
@@ -373,25 +374,32 @@ mod tests {
     }
 
     #[test]
-    fn old_configs_default_to_ark() {
+    fn configs_without_provider_default_to_phonon() {
         // A config written before providers existed has no "provider" key.
         let json = r#"{
             "port": 9090, "language": "en", "max_new_tokens": 128,
             "vad_threshold": 0.01, "threads": 4, "min_audio_ms": 6000
         }"#;
         let config: AsrConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.provider.kind, ProviderKind::Ark);
+        assert_eq!(config.provider.kind, ProviderKind::Phonon);
         assert_eq!(config.provider, ProviderConfig::default());
 
         // So does an empty provider object.
         let config: AsrConfig = serde_json::from_str(r#"{"provider": {}}"#).unwrap();
-        assert_eq!(config.provider.kind, ProviderKind::Ark);
+        assert_eq!(config.provider.kind, ProviderKind::Phonon);
         assert_eq!(config.provider.streaming_delay_ms, 100);
+    }
+
+    #[test]
+    fn saved_ark_selection_is_preserved() {
+        let config: AsrConfig = serde_json::from_str(r#"{"provider":{"kind":"ark"}}"#).unwrap();
+        assert_eq!(config.provider.kind, ProviderKind::Ark);
     }
 
     #[test]
     fn all_provider_kinds_roundtrip() {
         for kind in [
+            ProviderKind::Phonon,
             ProviderKind::Ark,
             ProviderKind::OpenAiCompatible,
             ProviderKind::VoxtralRealtime,
@@ -514,7 +522,11 @@ mod tests {
                 "{kind:?} must be streaming"
             );
         }
-        for kind in [ProviderKind::Ark, ProviderKind::OpenAiCompatible] {
+        for kind in [
+            ProviderKind::Phonon,
+            ProviderKind::Ark,
+            ProviderKind::OpenAiCompatible,
+        ] {
             assert!(
                 !ProviderConfig {
                     kind,

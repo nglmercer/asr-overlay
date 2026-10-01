@@ -17,6 +17,7 @@ defineProps<{
     <div class="field">
       <label for="provider_kind">Transcription provider</label>
       <select id="provider_kind" v-model="config.provider.kind">
+        <option value="phonon">Phonon-2 (local CPU server, English)</option>
         <option value="ark">Local ARK-ASR (on-device)</option>
         <option value="openai_compatible">OpenAI-compatible HTTP</option>
         <option value="voxtral_realtime">Mistral Voxtral realtime</option>
@@ -26,6 +27,10 @@ defineProps<{
     </div>
     <p class="hint">
       Switching provider, model, base URL, or API-key variable restarts listening automatically.
+    </p>
+    <p class="hint" v-if="config.provider.kind === 'phonon'">
+      Start the separate CPU server with <code>fermion serve phonon-2 --port 8000</code>.
+      The default base URL is http://127.0.0.1:8000/v1. English only; no GPU required.
     </p>
     <div class="field" id="provider_base_url_field" v-if="isHttp">
       <label for="provider_base_url">Base URL</label>

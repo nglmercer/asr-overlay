@@ -1,5 +1,6 @@
 //! Speech recognition, behind one of several providers.
 //!
+//! - `phonon`: local English-only Phonon-2 CPU server over HTTP (default).
 //! - `ark`: local Audio8 ARK-ASR 0.6B, INT8 ONNX, CPU-only.
 //! - `openai_compatible`: `POST {base_url}/audio/transcriptions` (OpenAI,
 //!   self-hosted Whisper, Mistral batch Voxtral).
@@ -15,6 +16,7 @@ pub mod gemini;
 pub mod mel;
 pub mod model;
 pub mod openai_compatible;
+pub mod phonon;
 pub mod provider;
 pub mod voxtral;
 
@@ -85,6 +87,11 @@ pub fn load(threads: usize, max_new_tokens: usize) -> Result<ArkAsr> {
 pub fn create_engine(config: &AsrConfig) -> Result<AsrEngine> {
     let provider = &config.provider;
     match provider.kind {
+        ProviderKind::Phonon => Ok(AsrEngine::Utterance(Box::new(phonon::PhononAsr::new(
+            &provider.base_url,
+            &provider.model,
+            provider.api_key(),
+        )))),
         ProviderKind::Ark => {
             log::info!("ASR provider: local ARK-ASR");
             Ok(AsrEngine::Utterance(Box::new(ArkEngine::new(
@@ -174,7 +181,11 @@ mod tests {
 
     #[test]
     fn factory_selects_utterance_providers() {
-        for kind in [ProviderKind::Ark, ProviderKind::OpenAiCompatible] {
+        for kind in [
+            ProviderKind::Phonon,
+            ProviderKind::Ark,
+            ProviderKind::OpenAiCompatible,
+        ] {
             match create_engine(&config_with(kind)) {
                 Ok(AsrEngine::Utterance(_)) => {}
                 other => panic!("{kind:?} must build an utterance engine: {}", other.is_ok()),
@@ -215,11 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn ark_factory_needs_no_model_on_disk() {
+    fn default_factory_needs_no_model_on_disk() {
         // Must not download or load anything: selection is offline.
         match create_engine(&AsrConfig::default()) {
             Ok(AsrEngine::Utterance(_)) => {}
-            _ => panic!("default config must build the ARK utterance engine"),
+            _ => panic!("default config must build an utterance engine"),
         }
     }
 

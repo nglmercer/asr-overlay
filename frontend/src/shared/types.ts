@@ -20,6 +20,7 @@ export interface OverlayStyle {
 }
 
 export type ProviderKind =
+  | 'phonon'
   | 'ark'
   | 'openai_compatible'
   | 'voxtral_realtime'
@@ -98,7 +99,7 @@ export function defaultStyle(): OverlayStyle {
 
 export function defaultProvider(): ProviderConfig {
   return {
-    kind: 'ark',
+    kind: 'phonon',
     base_url: '',
     model: '',
     api_key_env: '',
